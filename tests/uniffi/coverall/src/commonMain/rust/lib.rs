@@ -14,6 +14,14 @@ mod additional;
 mod ffi_buffer_scaffolding_test;
 
 mod traits;
+
+// T0.C.7: per-callback-interface vtable_index Rust shim. Compiled only for
+// wasm32-unknown-unknown; on JVM/Native this module is skipped entirely so
+// the gobley_callbacks.* imports never reach the linker. See the file header
+// for why this exists and the long-term replacement plan.
+#[cfg(target_arch = "wasm32")]
+mod wasm_vtable_shim;
+
 pub use traits::{
     ancestor_names, get_string_util_traits, get_traits, make_rust_getters, test_getters,
     test_round_trip_through_foreign, test_round_trip_through_rust, Getters, NodeTrait, StringUtil,
