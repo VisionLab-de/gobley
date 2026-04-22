@@ -42,6 +42,22 @@ abstract class TransformWasmTask : CommandTask() {
     @get:Optional
     abstract val functionImportsFile: RegularFileProperty
 
+    /**
+     * Optional output directory for the per-crate Kotlin/Wasm JavaScript shim
+     * (`gobley_<crate>_wasmjs_helpers.mjs`). When set, the transformer also
+     * runs its `KotlinWasmJsHelpersRenderer` against the input WASM and writes
+     * the bridge module here. Wired by [gobley.gradle.cargo.CargoPlugin] when
+     * the project declares a `wasmJs()` Kotlin target alongside the existing
+     * `js()` one — see T0.C.6.
+     *
+     * Left unset for `kotlin("js")`-only consumers, in which case only the
+     * Kotlin/JS file in [outputDirectory] is generated (back-compat with the
+     * pre-T0.C.6 pipeline).
+     */
+    @get:OutputDirectory
+    @get:Optional
+    abstract val wasmJsHelpersOutputDirectory: DirectoryProperty
+
     @TaskAction
     fun transformWasm() {
         @OptIn(InternalGobleyGradleApi::class)
@@ -62,6 +78,18 @@ abstract class TransformWasmTask : CommandTask() {
             arguments("--package-name", packageName)
             if (functionImportsFile.isPresent) {
                 arguments("--function-imports-file", functionImportsFile.get())
+            }
+            if (wasmJsHelpersOutputDirectory.isPresent) {
+                val helpersDir = wasmJsHelpersOutputDirectory.get().asFile
+                if (!helpersDir.exists()) {
+                    helpersDir.mkdirs()
+                }
+                val mjsFileName = "gobley_${crateName.get().replace('-', '_')}_wasmjs_helpers.mjs"
+                arguments(
+                    "--mjs-output",
+                    wasmJsHelpersOutputDirectory.get().file(mjsFileName),
+                )
+                arguments("--crate-name", crateName.get())
             }
         }.get().apply {
             assertNormalExitValueUsingLogger()

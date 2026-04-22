@@ -35,6 +35,21 @@ struct Cli {
     /// inserted into the transformed WASM module.
     #[clap(long, short)]
     function_imports_file: Option<Utf8PathBuf>,
+
+    /// Optional path where the Kotlin/Wasm JavaScript shim
+    /// (`<crate>_wasmjs_helpers.mjs`) will be written. When supplied,
+    /// the transformer additionally generates the per-crate JS bridge
+    /// described in `KotlinWasmJsHelpersRenderer` (T0.C.6). When absent,
+    /// only the Kotlin/JS file is generated (back-compat with the
+    /// existing `kotlin("js")` flow).
+    #[clap(long)]
+    mjs_output: Option<Utf8PathBuf>,
+
+    /// Crate name used for documentation comments in the generated
+    /// `.mjs` shim. Required when `--mjs-output` is set; ignored
+    /// otherwise. Defaults to the file stem of `--input` if not given.
+    #[clap(long)]
+    crate_name: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -43,8 +58,10 @@ fn main() -> anyhow::Result<()> {
         output,
         package_name,
         function_imports_file: function_imports_file_path,
+        mjs_output,
+        crate_name,
     } = Cli::parse();
-    let input = fs::read(&input).with_context(|| format!("failed to read `{input}`"))?;
+    let input_bytes = fs::read(&input).with_context(|| format!("failed to read `{input}`"))?;
 
     let mut function_imports = vec![];
     if let Some(function_imports_file_path) = function_imports_file_path {
@@ -66,7 +83,36 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let transformer = Transformer::new(&input, function_imports)?;
+    // The Kotlin/JS render path consumes the transformer; if we also
+    // need the .mjs shim we have to build a second `Transformer`. Both
+    // start from the same source bytes; the .mjs render path does NOT
+    // run `transform()` (it inspects the source module's import section
+    // directly), so the cost is just one extra walrus parse — cheap
+    // relative to the bindgen + cargo work upstream.
+    if let Some(mjs_output_path) = mjs_output.as_ref() {
+        let crate_name = crate_name
+            .clone()
+            .or_else(|| {
+                input
+                    .file_stem()
+                    .map(|stem| stem.replace('-', "_"))
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--crate-name is required when --mjs-output is set, and could not be inferred from input file name"
+                )
+            })?;
+        let mjs_transformer = Transformer::new(&input_bytes, vec![])?;
+        let mjs_content = mjs_transformer.render_into_mjs(&crate_name)?;
+        if let Some(parent) = mjs_output_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory `{parent}`"))?;
+        }
+        fs::write(mjs_output_path, mjs_content)
+            .with_context(|| format!("failed to write `{mjs_output_path}`"))?;
+    }
+
+    let transformer = Transformer::new(&input_bytes, function_imports)?;
     let output_kt = transformer.render_into_kt(package_name.as_deref())?;
     fs::write(&output, output_kt).with_context(|| format!("failed to write `{output}`"))?;
     Ok(())

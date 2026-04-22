@@ -216,6 +216,70 @@ impl<'a> KotlinJsRenderer<'a> {
     }
 }
 
+/// Well-known import module that gobley-bindgen-emitted Kotlin/Wasm
+/// expects to bind for callback-interface dispatch and async-future
+/// continuations. Documented in `crates/gobley-uniffi-bindgen/src/templates/wasm-js/CallbackInterfaceImpl.kt`
+/// and `wasm-js/Async.kt`.
+const GOBLEY_CALLBACKS_MODULE: &str = "gobley_callbacks";
+
+/// Description of a single Rust-side import the JS shim must bind to a
+/// Kotlin `@JsExport` function. Currently always sourced from imports
+/// in the `gobley_callbacks` module — see `Transformer::rust_callback_imports`.
+#[derive(Debug, Clone)]
+struct WasmJsCallbackBinding {
+    module: String,
+    name: String,
+}
+
+/// Renderer for the per-crate JavaScript shim that bridges the Rust
+/// `wasm32-unknown-unknown` cdylib and the Kotlin/Wasm bindings.
+///
+/// Distinct from `KotlinJsRenderer` (which targets Kotlin/JS plain-`js()`
+/// loaders): the wasmJs renderer emits ES module JavaScript (`.mjs`) and
+/// is consumed at runtime by the Kotlin/Wasm app via `import("...")`.
+///
+/// The shim's responsibilities are documented in the template
+/// (`templates/wasmjs_helpers.mjs`):
+///   * `WebAssembly.instantiate` the Rust module with an import
+///     dictionary mapping `gobley_callbacks.<name>` → Kotlin `@JsExport`
+///     `fun <name>(...)`.
+///   * Install a memory-growth-safe `globalThis.__gobleyWasmMemory`
+///     `DataView` that the inline `@JsFun` accessors in
+///     `wasm-js/PointerHelper.kt` read on every primitive call.
+///   * Expose `globalThis.__gobleyRustExports` for inline `@JsFun`
+///     bodies that reach into Rust exports directly (vtable index
+///     lookups in `wasm-js/CallbackInterfaceImpl.kt`).
+#[derive(Template)]
+#[template(syntax = "kt", escape = "none", path = "wasmjs_helpers.mjs")]
+pub struct KotlinWasmJsHelpersRenderer<'a> {
+    crate_name: &'a str,
+    callback_bindings: &'a [WasmJsCallbackBinding],
+}
+
+impl KotlinWasmJsHelpersRenderer<'_> {
+    /// Names of `@JsExport` Kotlin functions the host must surface to
+    /// the shim. We derive this from the Rust import set rather than a
+    /// separate registry: every `gobley_callbacks.<name>` import in the
+    /// Rust module corresponds to a Kotlin `@JsExport public fun <name>`.
+    fn kotlin_callback_exports(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .callback_bindings
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
+    /// Rust-side imports the shim must bind to Kotlin `@JsExport`
+    /// functions. Currently sourced from the `gobley_callbacks` module
+    /// only; see `GOBLEY_CALLBACKS_MODULE`.
+    fn rust_callback_imports(&self) -> &[WasmJsCallbackBinding] {
+        self.callback_bindings
+    }
+}
+
 impl Transformer {
     pub fn new(input: &[u8], function_imports: Vec<WasmFunctionImport>) -> anyhow::Result<Self> {
         Ok(Self {
@@ -251,5 +315,49 @@ impl Transformer {
             wasm_bindgen_js_modules: &self.wasm_bindgen_js_modules,
         };
         Ok(renderer.render()?)
+    }
+
+    /// Render the per-crate Kotlin/Wasm JS shim (`.mjs`) for the
+    /// already-loaded module. Idempotent: does NOT re-run the
+    /// transformation pipeline. Call after `render_into_kt` on a fresh
+    /// `Transformer` instance, or call standalone — both work.
+    ///
+    /// `crate_name` is the Cargo crate name (snake_cased version goes
+    /// into the doc comment of the emitted module). The shim itself
+    /// does not bake the name into runtime behavior.
+    ///
+    /// The shim binds Rust imports under module `gobley_callbacks` to
+    /// Kotlin `@JsExport` functions of the same name. If the Rust
+    /// module declares no such imports the shim still emits — the host
+    /// can use it purely for `init` + memory bridging without callback
+    /// support.
+    pub fn render_into_mjs(&self, crate_name: &str) -> anyhow::Result<String> {
+        let bindings = Self::collect_callback_bindings(&self.module);
+        let renderer = KotlinWasmJsHelpersRenderer {
+            crate_name,
+            callback_bindings: &bindings,
+        };
+        Ok(renderer.render()?)
+    }
+
+    /// Walk the WASM imports section and collect every entry under
+    /// `GOBLEY_CALLBACKS_MODULE`. Order is preserved as walrus iterates
+    /// the section, which mirrors the original module's import order —
+    /// keeps generated shim diffs reviewable across rebuilds.
+    fn collect_callback_bindings(module: &Module) -> Vec<WasmJsCallbackBinding> {
+        let mut bindings = vec![];
+        for import in module.imports.iter() {
+            if import.module != GOBLEY_CALLBACKS_MODULE {
+                continue;
+            }
+            if !matches!(import.kind, ImportKind::Function(_)) {
+                continue;
+            }
+            bindings.push(WasmJsCallbackBinding {
+                module: import.module.clone(),
+                name: import.name.clone(),
+            });
+        }
+        bindings
     }
 }

@@ -52,6 +52,8 @@ import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinAndroidTarget
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinMetadataTarget
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinWithJavaTarget
+import org.jetbrains.kotlin.gradle.targets.js.KotlinWasmTargetType
+import org.jetbrains.kotlin.gradle.targets.js.ir.KotlinJsIrTarget
 import org.jetbrains.kotlin.gradle.targets.jvm.KotlinJvmTarget
 import org.jetbrains.kotlin.gradle.tasks.CInteropProcess
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask
@@ -143,11 +145,9 @@ class UniFfiPlugin : Plugin<Project> {
             project.logger.warn("JS targets are added, but the UniFFI plugin does not support JS targets yet.")
         }
 
-        val hasWasmTargets =
-            kotlinExtensionDelegate.targets.any { it.platformType == KotlinPlatformType.wasm }
-        if (hasWasmTargets) {
-            project.logger.warn("WASM targets are added, but the UniFFI plugin does not support WASM targets yet.")
-        }
+        // T0.C.6: Kotlin/Wasm support added — bindgen now emits a wasmJs source
+        // tree consumed by the wasmJs() Kotlin target. Pre-T0.C.6 this method
+        // warned that WASM targets were unsupported; that warning is now stale.
     }
 
     private fun Project.configureBindingTasks() {
@@ -253,11 +253,17 @@ class UniFfiPlugin : Plugin<Project> {
             @OptIn(InternalGobleyGradleApi::class)
             kotlinTargets.set(
                 kotlinExtensionDelegate.targets.mapNotNull {
-                    when (it) {
-                        is KotlinMetadataTarget -> null
-                        is KotlinJvmTarget, is KotlinWithJavaTarget<*, *> -> "jvm"
-                        is KotlinAndroidTarget -> "android"
-                        is KotlinNativeTarget -> "native"
+                    when {
+                        it is KotlinMetadataTarget -> null
+                        it is KotlinJvmTarget || it is KotlinWithJavaTarget<*, *> -> "jvm"
+                        it is KotlinAndroidTarget -> "android"
+                        it is KotlinNativeTarget -> "native"
+                        // T0.C.6: emit wasm-js bindgen output for Kotlin/Wasm
+                        // (wasmJs) targets. wasmWasi falls through to "stub"
+                        // until T0.B Decision 5's deferred work lands.
+                        it is KotlinJsIrTarget
+                            && it.platformType == KotlinPlatformType.wasm
+                            && it.wasmTargetType == KotlinWasmTargetType.JS -> "wasmJs"
                         else -> "stub"
                     }
                 }
@@ -409,6 +415,19 @@ class UniFfiPlugin : Plugin<Project> {
                     generateDummyDefFileTask,
                 )
 
+                // T0.C.6: Kotlin/Wasm wasmJs() target — wire bindgen output
+                // into wasmJsMain. Other Kotlin/Wasm subtargets (wasmWasi)
+                // fall through to the stub source set per design Decision 5.
+                is KotlinJsIrTarget -> {
+                    if (platformType == KotlinPlatformType.wasm
+                        && wasmTargetType == KotlinWasmTargetType.JS
+                    ) {
+                        configureKotlinWasmJsTarget()
+                    } else {
+                        configureUnsupportedTarget(this)
+                    }
+                }
+
                 else -> configureUnsupportedTarget(this)
             }
         }
@@ -529,6 +548,20 @@ class UniFfiPlugin : Plugin<Project> {
         }
     }
 
+    /**
+     * T0.C.6: wire the Kotlin/Wasm (wasmJs) bindgen output (`<ns>.wasmJs.kt`)
+     * into the `wasmJsMain` source set. The accompanying JavaScript bridge
+     * (`gobley_<crate>_wasmjs_helpers.mjs`) is wired separately by
+     * `CargoPlugin.configureWasmJsCompilation`, which adds it to
+     * `wasmJsMain.resources`.
+     */
+    @OptIn(InternalGobleyGradleApi::class)
+    private fun Project.configureKotlinWasmJsTarget() {
+        with(kotlinExtensionDelegate.sourceSets.wasmJsMain) {
+            kotlin.srcDir(wasmJsBindingsDirectory)
+        }
+    }
+
     private fun Project.configureUnsupportedTarget(kotlinTarget: KotlinTarget) {
         kotlinTarget.compilations.getByName("main").defaultSourceSet {
             kotlin.srcDir(stubBindingsDirectory)
@@ -556,6 +589,12 @@ private val Project.nativeBindingsDirectory: Provider<Directory>
 
 private val Project.stubBindingsDirectory: Provider<Directory>
     get() = bindingsDirectory.map { it.dir("stubMain/kotlin") }
+
+// T0.C.6: source set directory for Kotlin/Wasm (wasmJs) bindgen output.
+// `gobley-uniffi-bindgen` writes `<ns>.wasmJs.kt` here when `kotlin_targets`
+// includes "wasmJs" — see `lib.rs::write_bindings_target`.
+private val Project.wasmJsBindingsDirectory: Provider<Directory>
+    get() = bindingsDirectory.map { it.dir("wasmJsMain/kotlin") }
 
 private val Project.androidGeneratedProguardFile: Provider<RegularFile>
     get() = bindingsDirectory.map { it.file("androidMain/generated-proguard-rules.txt") }
