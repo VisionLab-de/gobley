@@ -51,7 +51,9 @@
                         {%- call docstring(callable, indent) -%}
                         {%- match callable.throws_type() -%}
                         {%-     when Some(throwable) %}
+                        {%-         if module_name != "wasmJs" %}
 {{ " "|repeat(indent) }}@Throws({{ throwable|type_name(ci) }}::class {%- if callable.is_async() -%}, kotlin.coroutines.cancellation.CancellationException::class{%- endif -%})
+                        {%-         endif %}
                         {%-     else -%}
                         {%- endmatch %}
 {{ " "|repeat(indent) }}{{ visibility() }}{% if func_decl.len() != 0 -%}{{ func_decl }} {% endif -%}
@@ -69,7 +71,9 @@
                         {%- call docstring(callable, indent) -%}
                         {%- match callable.throws_type() -%}
                         {%-     when Some(throwable) %}
+                        {%-         if module_name != "wasmJs" %}
 {{ " "|repeat(indent) }}@Throws({{ throwable|type_name(ci) }}::class {%- if callable.is_async() -%}, kotlin.coroutines.cancellation.CancellationException::class{%- endif -%})
+                        {%-         endif %}
                         {%-     else -%}
                         {%- endmatch %}
 {{ " "|repeat(indent) }}{{ visibility() }}{% if func_decl.len() != 0 -%}{{ func_decl }} {% endif -%}
