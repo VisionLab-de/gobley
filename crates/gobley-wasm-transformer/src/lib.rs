@@ -216,6 +216,41 @@ impl<'a> KotlinJsRenderer<'a> {
     }
 }
 
+/// Renderer for the per-crate Kotlin file that surfaces the Rust
+/// `wasm32-unknown-unknown` cdylib bytes to a Kotlin/Wasm host (the
+/// `wasmJs` Kotlin target). Sibling to `KotlinJsRenderer`; both consume
+/// the same transformed WASM module but emit very different surfaces.
+///
+/// `KotlinJsRenderer` (Kotlin/JS path) emits a self-contained loader:
+/// `external WebAssembly` class hierarchy, base64-decode helpers,
+/// nested `external interface RustWebAssemblyExports`, per-module
+/// `Import_<name>` nested classes with `tblIdx_<name>` constants, and
+/// the `createInstance(...)` factory. That surface relies on a slew of
+/// Kotlin/JS-only features that Kotlin/Wasm rejects: `kotlin.Any`
+/// parameters in `external fun`, `org.khronos.webgl.ArrayBuffer`,
+/// nested classes inside interfaces, and `dynamic`. T0.C.7.C found 200+
+/// errors when the JS file was fed straight to Kotlin/Wasm 2.1.10.
+///
+/// `KotlinWasmJsRenderer` (this struct) emits a minimal, Kotlin/Wasm-
+/// compatible file: package declaration, the `GOBLEY_WASM_BASE64`
+/// constant, and a small `gobleyWasmBytes()` decoder. Actual
+/// `WebAssembly.instantiate` happens on the JavaScript side via the
+/// `gobley_<crate>_wasmjs_helpers.mjs` shim emitted by
+/// `KotlinWasmJsHelpersRenderer` (T0.C.6). The bindgen-emitted
+/// `wasm-js/NamespaceLibraryTemplate.kt` calls into the .mjs shim's
+/// `init(...)` once T0.C.3.b lands; until then the Kotlin file just
+/// needs to compile cleanly so the `wasmJsMain` source set is healthy.
+///
+/// Marked `pub(crate)`: external CLI consumers go through
+/// `Transformer::render_into_wasmjs_kt`, mirroring the
+/// `KotlinWasmJsHelpersRenderer` / `render_into_mjs` pairing.
+#[derive(Template)]
+#[template(syntax = "kt", escape = "none", path = "wasmjs.kt")]
+pub(crate) struct KotlinWasmJsRenderer<'a> {
+    package_name: Option<&'a str>,
+    base64: &'a str,
+}
+
 /// Well-known import module that gobley-bindgen-emitted Kotlin/Wasm
 /// expects to bind for callback-interface dispatch and async-future
 /// continuations. Documented in `crates/gobley-uniffi-bindgen/src/templates/wasm-js/CallbackInterfaceImpl.kt`
@@ -313,6 +348,37 @@ impl Transformer {
             module: &module,
             global_entities: &self.global_entities,
             wasm_bindgen_js_modules: &self.wasm_bindgen_js_modules,
+        };
+        Ok(renderer.render()?)
+    }
+
+    /// Render the per-crate Kotlin file for the **wasmJs** (Kotlin/Wasm)
+    /// target. Sibling of `render_into_kt`, which targets Kotlin/JS.
+    ///
+    /// Emits a Kotlin/Wasm-compatible source: no `kotlin.Any` in
+    /// `external fun`, no `org.khronos.webgl.ArrayBuffer`, no nested
+    /// classes inside interfaces, no `dynamic`. The actual
+    /// `WebAssembly.instantiate` call is delegated to the per-crate JS
+    /// shim emitted by `render_into_mjs`; the Kotlin file only carries
+    /// the WASM bytes (`GOBLEY_WASM_BASE64`) plus a stdlib-free base64
+    /// decoder (`gobleyWasmBytes`) — Kotlin/Wasm 2.1.10's stdlib does
+    /// not ship `kotlin.io.encoding.Base64` for the wasmJs target.
+    ///
+    /// The transformer pipeline (`transform()`) runs identically to the
+    /// Kotlin/JS path so the underlying WASM bytes match exactly across
+    /// targets — same stack-pointer shim, same function-imports
+    /// injection, same wasm-bindgen rewrites. Only the Kotlin wrapper
+    /// differs.
+    pub fn render_into_wasmjs_kt(mut self, package_name: Option<&str>) -> anyhow::Result<String> {
+        use base64::prelude::BASE64_STANDARD;
+
+        self.transform()?;
+
+        let wasm = self.module.emit_wasm();
+        let wasm_base64 = BASE64_STANDARD.encode(&wasm);
+        let renderer = KotlinWasmJsRenderer {
+            package_name,
+            base64: &wasm_base64,
         };
         Ok(renderer.render()?)
     }

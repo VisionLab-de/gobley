@@ -45,6 +45,27 @@ struct Cli {
     #[clap(long)]
     mjs_output: Option<Utf8PathBuf>,
 
+    /// Optional path where the Kotlin/Wasm-flavored Kotlin file will be
+    /// written, in addition to the Kotlin/JS file at `--output`. When
+    /// supplied, the transformer runs `Transformer::render_into_wasmjs_kt`
+    /// against the same input WASM module and writes a Kotlin/Wasm-
+    /// compatible source file alongside the Kotlin/JS one. The two
+    /// files share the same package name (passed via `--package-name`)
+    /// but live at different filesystem paths so the wasmJs source set
+    /// can be wired separately from the js source set in Gradle.
+    ///
+    /// When absent, only the Kotlin/JS file at `--output` is generated
+    /// (back-compat with the pre-T0.C.6.b pipeline).
+    ///
+    /// The wasmJs Kotlin file is intentionally minimal: package
+    /// declaration, the `GOBLEY_WASM_BASE64` constant, and a small
+    /// `gobleyWasmBytes()` decoder. The actual `WebAssembly.instantiate`
+    /// call lives in the per-crate `.mjs` shim emitted to `--mjs-output`,
+    /// not in this Kotlin file. See `KotlinWasmJsRenderer` doc comment
+    /// in `lib.rs` for the full rationale.
+    #[clap(long)]
+    wasmjs_output: Option<Utf8PathBuf>,
+
     /// Crate name used for documentation comments in the generated
     /// `.mjs` shim. Required when `--mjs-output` is set; ignored
     /// otherwise. Defaults to the file stem of `--input` if not given.
@@ -59,6 +80,7 @@ fn main() -> anyhow::Result<()> {
         package_name,
         function_imports_file: function_imports_file_path,
         mjs_output,
+        wasmjs_output,
         crate_name,
     } = Cli::parse();
     let input_bytes = fs::read(&input).with_context(|| format!("failed to read `{input}`"))?;
@@ -110,6 +132,24 @@ fn main() -> anyhow::Result<()> {
         }
         fs::write(mjs_output_path, mjs_content)
             .with_context(|| format!("failed to write `{mjs_output_path}`"))?;
+    }
+
+    // T0.C.6.b: optional Kotlin/Wasm-flavored Kotlin file. Each
+    // `render_into_*_kt` call consumes its `Transformer`, so we build a
+    // dedicated one here. Same input bytes, same `function_imports`
+    // injection (so the WASM payload baked into the wasmJs file matches
+    // the JS file's payload byte-for-byte). Cost: one extra walrus parse
+    // + one extra `transform()` pass — still cheap next to the cargo
+    // build that produced the input.
+    if let Some(wasmjs_output_path) = wasmjs_output.as_ref() {
+        let wasmjs_transformer = Transformer::new(&input_bytes, function_imports.clone())?;
+        let wasmjs_content = wasmjs_transformer.render_into_wasmjs_kt(package_name.as_deref())?;
+        if let Some(parent) = wasmjs_output_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory `{parent}`"))?;
+        }
+        fs::write(wasmjs_output_path, wasmjs_content)
+            .with_context(|| format!("failed to write `{wasmjs_output_path}`"))?;
     }
 
     let transformer = Transformer::new(&input_bytes, function_imports)?;

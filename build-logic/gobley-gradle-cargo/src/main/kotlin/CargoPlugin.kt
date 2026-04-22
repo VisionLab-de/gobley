@@ -699,17 +699,39 @@ class CargoPlugin : Plugin<Project> {
                     .dir(profile.targetChildDirectoryName)
                     .dir("wasmjs-helpers")
             }
+        // T0.C.6.b: Kotlin/Wasm-flavored Kotlin output. Lives in a
+        // sibling root (`cargo-wasm-transformation-wasmjs/`) rather
+        // than inside `cargo-wasm-transformation/` so the Kotlin/JS
+        // source set's recursive scan of [outputDirectory] does not
+        // pick it up — the Kotlin/JS file uses `kotlin.Any` /
+        // `org.khronos.webgl.ArrayBuffer` / nested classes that
+        // Kotlin/Wasm rejects, and vice versa for the wasmJs file.
+        val wasmJsKotlinOutputDir = layout.buildDirectory
+            .dir("generated/cargo-wasm-transformation-wasmjs")
+            .zip(cargoBuildVariant.profile) { dir, profile ->
+                dir
+                    .dir(cargoBuildVariant.rustTarget.rustTriple)
+                    .dir(profile.targetChildDirectoryName)
+            }
         cargoBuildVariant.transformWasmProvider.configure {
             wasmTransformer.set(wasmBindgenInstallTask.get().wasmTransformer)
             wasmJsHelpersOutputDirectory.set(mjsOutputDir)
+            wasmJsKotlinOutputDirectory.set(wasmJsKotlinOutputDir)
         }
 
         if (!cargoBuildVariant.embedRustLibrary.get())
             return
 
         kotlinExtensionDelegate.sourceSets.run {
+            // T0.C.6.b: wasmJs source set picks up the dedicated Kotlin/Wasm
+            // file emitted by `KotlinWasmJsRenderer`, NOT the shared
+            // `outputDirectory` which holds the Kotlin/JS file. The Kotlin/JS
+            // file would fail to compile under Kotlin/Wasm 2.1.10 (200+
+            // errors per T0.C.7.C) — use the wasmJs-flavored sibling instead.
             wasmJsMain.kotlin.srcDir(
-                cargoBuildVariant.transformWasmProvider.flatMap { it.outputDirectory }
+                cargoBuildVariant.transformWasmProvider.flatMap {
+                    it.wasmJsKotlinOutputDirectory
+                }
             )
             wasmJsMain.resources.srcDir(
                 cargoBuildVariant.transformWasmProvider.flatMap {

@@ -58,6 +58,34 @@ abstract class TransformWasmTask : CommandTask() {
     @get:Optional
     abstract val wasmJsHelpersOutputDirectory: DirectoryProperty
 
+    /**
+     * Optional output directory for the Kotlin/Wasm-flavored Kotlin file
+     * (`<package>.kt`). When set, the transformer also runs its
+     * `KotlinWasmJsRenderer` against the input WASM and writes a Kotlin/Wasm-
+     * compatible source file here, in addition to the Kotlin/JS file at
+     * [outputDirectory]. Wired by [gobley.gradle.cargo.CargoPlugin] when
+     * the project declares a `wasmJs()` Kotlin target — see T0.C.6.b.
+     *
+     * Why a separate output directory rather than reusing [outputDirectory]:
+     * the Kotlin/JS file emitted to [outputDirectory] uses Kotlin/JS-only
+     * features (`kotlin.Any` in `external fun`, `org.khronos.webgl.ArrayBuffer`,
+     * nested classes inside interfaces, `dynamic`) that Kotlin/Wasm 2.1.10
+     * rejects with 200+ errors. Both source sets cannot share the same
+     * generated `.kt` — they need physically distinct files. We could put
+     * the wasmJs file inside [outputDirectory] under a subdirectory, but
+     * Gradle source set scanning is recursive and the Kotlin/JS source set
+     * would then try to compile the wasmJs file too. Keeping the wasmJs
+     * output in a sibling directory (rather than a child) avoids that
+     * crossfire entirely.
+     *
+     * Left unset for `kotlin("js")`-only consumers, in which case only the
+     * Kotlin/JS file in [outputDirectory] is generated (back-compat with the
+     * pre-T0.C.6.b pipeline).
+     */
+    @get:OutputDirectory
+    @get:Optional
+    abstract val wasmJsKotlinOutputDirectory: DirectoryProperty
+
     @TaskAction
     fun transformWasm() {
         @OptIn(InternalGobleyGradleApi::class)
@@ -90,6 +118,16 @@ abstract class TransformWasmTask : CommandTask() {
                     wasmJsHelpersOutputDirectory.get().file(mjsFileName),
                 )
                 arguments("--crate-name", crateName.get())
+            }
+            if (wasmJsKotlinOutputDirectory.isPresent) {
+                val wasmJsKotlinDir = wasmJsKotlinOutputDirectory.get().asFile
+                if (!wasmJsKotlinDir.exists()) {
+                    wasmJsKotlinDir.mkdirs()
+                }
+                arguments(
+                    "--wasmjs-output",
+                    wasmJsKotlinOutputDirectory.get().file("$packageName.kt"),
+                )
             }
         }.get().apply {
             assertNormalExitValueUsingLogger()
