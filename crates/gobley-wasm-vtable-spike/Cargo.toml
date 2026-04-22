@@ -1,0 +1,35 @@
+#
+# T0.C.1 vtable feasibility spike for Kotlin/Wasm callbacks.
+#
+# Builds a wasm32-unknown-unknown cdylib that:
+#   1. Declares three host-imported callbacks (default `extern "C"` module
+#      name = "env"; production binding picks `gobley_callbacks` via
+#      `#[link(wasm_import_module = ...)]`).
+#   2. Forces those imports into the __indirect_function_table by taking
+#      their addresses, so Rust code can dispatch them via call_indirect
+#      by table index.
+#   3. Exports helpers that the JS harness uses to read the indices and
+#      trigger the indirect calls.
+#
+# Excluded from the parent workspace because cdylib builds need their own
+# release profile and the workspace targets are JVM/Native-shaped.
+#
+
+[package]
+name = "gobley-wasm-vtable-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "T0.C.1 spike — verify call_indirect of host imports for Kotlin/Wasm vtables"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "s"
+lto = false
+codegen-units = 1
+panic = "abort"
+strip = false
+
+[workspace]

@@ -1,0 +1,7 @@
+# Force wasm-ld to export __indirect_function_table so the JS harness can call
+# `instance.exports.__indirect_function_table.get(idx)` and confirm what each
+# index resolves to. Without this flag wasm-ld keeps the table internal even
+# though it still populates it for `call_indirect`.
+
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--export-table"]
