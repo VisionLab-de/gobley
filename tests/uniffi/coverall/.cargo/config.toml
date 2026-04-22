@@ -1,0 +1,19 @@
+# Force wasm-ld to expose `__indirect_function_table` so the JS shim layer can
+# (a) cross-check vtable indices reported by `uniffi_<ns>_callback_<iface>_vtable_index`
+# exports against `instance.exports.__indirect_function_table.get(idx)`, and
+# (b) surface the table on `globalThis.__gobleyIndirectFunctionTable` for the
+# Kotlin/Wasm bindings to introspect (see
+# `crates/gobley-wasm-transformer/src/templates/wasmjs_helpers.mjs`).
+#
+# Without this flag wasm-ld keeps the table internal — Rust-side `call_indirect`
+# still works but JS cannot validate or splice entries. Documented in the
+# T0.C.1 vtable spike (`crates/gobley-uniffi-bindgen/docs/T0-vtable-spike.md`,
+# "Required linker flag" section).
+#
+# Scope: only the wasm32-unknown-unknown cargo target. JVM/Native builds are
+# unaffected. Cargo's `.cargo/config.toml` discovery walks up from the package
+# root, so this file applies whenever cargo is invoked with this fixture as
+# its working directory (which is what `gobley-gradle-cargo`'s
+# `CargoPackageTask` does — see `tasks/CargoPackageTask.kt`).
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--export-table"]
