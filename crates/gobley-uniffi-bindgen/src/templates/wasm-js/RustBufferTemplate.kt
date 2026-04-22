@@ -16,6 +16,9 @@
 // `Long`). On Wasm they're really u32, so we mask off the high bits when
 // converting from `Long` back to `Int` for the underlying wasm calls.
 
+/** Pointer width on wasm32; revisit if memory64 ever ships. */
+internal const val WASM_POINTER_SIZE_BYTES: Int = 4
+
 @kotlin.jvm.JvmInline
 {{ visibility() }}value class RustBuffer(internal val ptr: Pointer) {
     internal companion object {
@@ -49,6 +52,11 @@
 // out of the buffer cursor; the JS shim copies one primitive at a time
 // into Kotlin's stack/locals — strictly cheaper than allocating a
 // Kotlin `ByteArray` mirror).
+//
+// LIFETIME: the returned ByteBuffer shares memory with this RustBuffer. If
+// the underlying RustBuffer is freed (RustBufferHelper.free), the ByteBuffer
+// becomes a dangling view into reused/zeroed Rust linear memory. Do not
+// retain past RustBufferHelper.free().
 {{ visibility() }}fun RustBuffer.asByteBuffer(): ByteBuffer? {
     {% call kt::check_rust_buffer_length("len") %}
     val dataPtr = data ?: return null
@@ -71,14 +79,10 @@
 
 // `from(bb)` — the *Kotlin → Rust* 2-copy bridge (T0.B Decision 1).
 //
-// Source `bb` is typically a `ByteBuffer` Kotlin code wrote into via the
-// `lowerIntoRustBuffer` path in `FfiConverterTemplate.kt`. On JVM/Native
-// the source already lives in Rust-allocated memory, so the lift/lower
-// cycle is zero-copy. On Kotlin/Wasm the source equally lives in Rust
-// memory (we always allocate via `RustBufferHelper.allocValue`), so this
-// helper is *not* on the hot lower path — it exists for the few uniffi
-// call sites that hand us a Kotlin-side `ByteArray` (for example,
-// `String` lower goes via Kotlin UTF-8 encode → `ByteArray` → here).
+// Currently no callers; reserved for future call sites that allocate
+// Kotlin-side ByteArray and need a zero-friction RustBuffer wrap. The
+// String lower path uses allocValue + asByteBuffer().put() instead
+// (see templates/ffi/StringHelper.kt:22-28).
 //
 // The two copies are:
 //   1. Kotlin `ByteArray` (in Kotlin/Wasm linear memory) → JS `Uint8Array`

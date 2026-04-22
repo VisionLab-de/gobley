@@ -33,6 +33,9 @@
     // limit cursor on Kotlin/Wasm — the buffer is always sized exactly
     // to its `capacity`, matching how `RustBuffer.asByteBuffer()` builds
     // it with `limit = len`.
+    // Construction sites: see asByteBuffer() in wasm-js/RustBufferTemplate.kt;
+    // if any future caller needs limit < capacity, this method must back a
+    // real cursor field.
     {{ visibility() }}fun limit(): Int = capacity
 
     {{ visibility() }}fun hasRemaining(): Boolean = capacity != position

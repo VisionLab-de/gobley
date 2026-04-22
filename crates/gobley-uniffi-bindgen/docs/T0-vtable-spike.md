@@ -1,5 +1,15 @@
 # T0.C.1 — vtable feasibility spike (Kotlin/Wasm callbacks)
 
+## Reproduce
+
+```
+rustup target add wasm32-unknown-unknown
+cargo build --target wasm32-unknown-unknown --release -p gobley-wasm-vtable-spike
+node crates/gobley-wasm-vtable-spike/test.mjs
+```
+
+Requires: Node 18+ (top-level await in `test.mjs`), `wasm-tools` (used in evidence inspection only).
+
 ## Verdict
 
 **CLEAN PATH FEASIBLE.** Rust `extern "C"` host imports become real
@@ -111,3 +121,6 @@ interface.
 - `crates/gobley-wasm-vtable-spike/.cargo/config.toml`
 - `crates/gobley-wasm-vtable-spike/src/lib.rs`
 - `crates/gobley-wasm-vtable-spike/test.mjs`
+
+## Disposability
+Retain as a wasm-ld behavior canary. CI should run `node crates/gobley-wasm-vtable-spike/test.mjs` on every Rust toolchain bump to catch index-assignment behavior regressions.

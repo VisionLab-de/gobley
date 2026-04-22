@@ -20,8 +20,8 @@ internal fun Pointer.toLong(): Long = (this as Int).toLong() and 0xFFFFFFFFL
 
 internal fun kotlin.Long.toPointer(): Pointer = this.toInt()
 
-// Pointer arithmetic helper. Used by `ByteBuffer.slice()`-style call sites
-// and the FFI-struct extension accessors (each field offset is a constant).
+// Reserved for future struct-field accessor codegen (T0.C.x). No active callers.
+// No overflow check: wasm32 linear memory is bounded by Int.MAX_VALUE-aligned 4 GB.
 @Suppress("NOTHING_TO_INLINE")
 internal inline fun Pointer.share(offset: Int): Pointer = this + offset
 

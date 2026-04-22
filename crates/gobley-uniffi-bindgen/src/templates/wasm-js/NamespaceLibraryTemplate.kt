@@ -129,6 +129,10 @@ internal object UniffiLib {
 
 // Async-safe variant for use from a Kotlin/Wasm `suspend fun main`.
 // T0.C.3 fills in the actual `WebAssembly.instantiate` Promise await.
+// Both sync + async variants exist per T0.B Issue #9: Kotlin/Wasm browsers
+// prohibit synchronous `WebAssembly.instantiate` for modules >4KB, so async
+// is mandatory in browser hosts; sync stays for non-browser hosts (Node, JVM
+// embedders) where the cdylib is already instantiable synchronously.
 {{ visibility() }}suspend fun uniffiEnsureInitializedAsync() {
     // TODO(T0.C.3): await `WebAssembly.instantiate(rustBytes, imports)`,
     // bind exports to UniffiLib, query each callback interface's

@@ -27,6 +27,7 @@
 // time `register(lib)` runs. Single-threaded JS event loop means
 // the `loaded` flag needs no synchronization.
 internal object {{ vtable_indices_obj }} {
+    // -1 = uncached. Valid indices are checked via the `loaded` flag, not the value.
     {%- for (_, meth) in vtable_methods.iter() %}
     internal var {{ meth.name()|var_name }}: Int = -1
     {%- endfor %}
@@ -157,10 +158,11 @@ internal object {{ trait_impl }} {
             {{ vtable_indices_obj }}.loaded = true
         }
 
-        val vtableSize = ({{ vtable_methods.len() }} + 1) * 4
+        val vtableSize = ({{ vtable_methods.len() }} + 1) * WASM_POINTER_SIZE_BYTES
+        // INTENTIONAL LEAK: see register() docstring above — bounded by callback interface count.
         val rbuf = RustBufferHelper.allocValue(vtableSize.toULong())
         val basePtr = rbuf.data
-            ?: throw RuntimeException(
+            ?: throw InternalException(
                 "Vtable alloc returned null data pointer for {{ name }}"
             )
 
@@ -170,7 +172,7 @@ internal object {{ trait_impl }} {
             basePtr + offset,
             {{ vtable_indices_obj }}.{{ meth.name()|var_name }},
         )
-        offset += 4
+        offset += WASM_POINTER_SIZE_BYTES
         {%- endfor %}
         WasmMemoryView.setInt(basePtr + offset, {{ vtable_indices_obj }}.uniffiFree)
 
@@ -205,6 +207,10 @@ internal object {{ trait_impl }} {
 // concatenated with type-suffixes (`Capacity`, `Len`, `Data`, `Ptr`)
 // for `RustBuffer` / by-reference flattening — backtick-quoted
 // identifiers cannot carry suffixes.
+//
+// VERIFY at T0.C.6: confirm wasm-bindgen / cdylib lowering of
+// init_callback_vtable_<iface>(VTableCallbackInterface<Iface>) accepts a
+// single i32 ptr arg.
 
 {%- for (ffi_callback, meth) in vtable_methods.iter() %}
 @JsExport
@@ -280,7 +286,7 @@ public fun gobley_callback_{{ name }}_{{ meth.name()|var_name_raw }}(
         {%- else %}
         // TODO(T0.C.5): unsupported MutReference inner type. Add
         // wrapper as needed.
-        TODO("Unsupported MutReference inner type for {{ name }}.{{ meth.name() }}: ${ {{- arg.name()|var_name_raw }}Ptr}")
+        TODO("Unsupported MutReference inner type for {{ name }}.{{ meth.name() }}: ${ {{- arg.name()|var_name_raw }}Ptr}"),
         {%- endmatch %}
         {%- when FfiType::Reference(_) %}
         {{ arg.name()|var_name_raw }}Ptr,
