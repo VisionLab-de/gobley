@@ -19,7 +19,10 @@ internal const val UNIFFI_RUST_CALL_STATUS_SIZE_BYTES: Int = 16
 internal const val UNIFFI_RUST_CALL_STATUS_OFFSET_CODE: Int = 0
 internal const val UNIFFI_RUST_CALL_STATUS_OFFSET_ERROR_BUF: Int = 4
 
-@kotlin.jvm.JvmInline
+// `value class` is sufficient on Kotlin/Wasm. `@JvmInline` is an
+// `@OptionalExpectation` that only resolves on JVM/Android source sets;
+// emitting it here triggers "Declaration annotated with '@OptionalExpectation'
+// can only be used in common module sources" on the wasmJs target.
 internal value class UniffiRustCallStatus(internal val ptr: Pointer)
 
 internal var UniffiRustCallStatus.code: Byte

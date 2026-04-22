@@ -22,8 +22,12 @@
 // modification — its three-field write goes through the
 // `var RustBuffer.{capacity,len,data}` setters in `RustBufferTemplate.kt`,
 // each of which delegates to `WasmMemoryView`.
+//
+// All `*ByReference` classes below use plain `value class` (no `@JvmInline`):
+// `@kotlin.jvm.JvmInline` is an `@OptionalExpectation` that only resolves on
+// JVM/Android, so emitting it on the wasmJs source set triggers a compile
+// error. The `value class` keyword alone is sufficient on Kotlin/Wasm.
 
-@kotlin.jvm.JvmInline
 internal value class ByteByReference(internal val ptr: Pointer)
 
 internal fun ByteByReference.setValue(value: Byte): Unit =
@@ -32,7 +36,6 @@ internal fun ByteByReference.setValue(value: Byte): Unit =
 internal fun ByteByReference.getValue(): Byte =
     WasmMemoryView.getByte(ptr)
 
-@kotlin.jvm.JvmInline
 internal value class ShortByReference(internal val ptr: Pointer)
 
 // `Short` (i16) emulated via two big-endian bytes — `WasmMemoryView` only
@@ -49,7 +52,6 @@ internal fun ShortByReference.getValue(): Short {
     return ((hi shl 8) or lo).toShort()
 }
 
-@kotlin.jvm.JvmInline
 internal value class IntByReference(internal val ptr: Pointer)
 
 internal fun IntByReference.setValue(value: Int): Unit =
@@ -58,7 +60,6 @@ internal fun IntByReference.setValue(value: Int): Unit =
 internal fun IntByReference.getValue(): Int =
     WasmMemoryView.getInt(ptr)
 
-@kotlin.jvm.JvmInline
 internal value class LongByReference(internal val ptr: Pointer)
 
 internal fun LongByReference.setValue(value: Long): Unit =
@@ -67,7 +68,6 @@ internal fun LongByReference.setValue(value: Long): Unit =
 internal fun LongByReference.getValue(): Long =
     WasmMemoryView.getLong(ptr)
 
-@kotlin.jvm.JvmInline
 internal value class FloatByReference(internal val ptr: Pointer)
 
 internal fun FloatByReference.setValue(value: Float): Unit =
@@ -76,7 +76,6 @@ internal fun FloatByReference.setValue(value: Float): Unit =
 internal fun FloatByReference.getValue(): Float =
     WasmMemoryView.getFloat(ptr)
 
-@kotlin.jvm.JvmInline
 internal value class DoubleByReference(internal val ptr: Pointer)
 
 internal fun DoubleByReference.setValue(value: Double): Unit =
@@ -85,7 +84,6 @@ internal fun DoubleByReference.setValue(value: Double): Unit =
 internal fun DoubleByReference.getValue(): Double =
     WasmMemoryView.getDouble(ptr)
 
-@kotlin.jvm.JvmInline
 internal value class PointerByReference(internal val ptr: Pointer)
 
 // `Pointer` is `Int` (cross-module wasm i32 address). The pointee slot

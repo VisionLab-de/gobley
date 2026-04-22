@@ -26,7 +26,11 @@ Unit
 {%- when FfiDefinition::Struct(ffi_struct) %}
 // FFI struct `{{ ffi_struct.name() }}` — backing layout lives in Rust
 // linear memory; Kotlin side carries a pointer + extension accessors.
-@kotlin.jvm.JvmInline
+//
+// `value class` only — `@kotlin.jvm.JvmInline` is an `@OptionalExpectation`
+// that only resolves on JVM/Android source sets, so emitting it on the
+// wasmJs target trips "Declaration annotated with '@OptionalExpectation'
+// can only be used in common module sources".
 internal value class {{ ffi_struct.name()|ffi_struct_name }}(internal val ptr: Pointer)
 
 {%- for field in ffi_struct.fields() %}
@@ -52,23 +56,17 @@ internal fun {{ ffi_struct.name()|ffi_struct_name }}.uniffiSetValue(other: {{ ff
     {%- endfor %}
 }
 
+// `data class` constructor is sufficient — its auto-generated primary
+// constructor already fulfils the `FooUniffiByValue(field1, field2, ...)`
+// call shape that callers expect. Emitting an extra top-level
+// `internal fun FooUniffiByValue(...)` factory with the same parameter
+// list collides with the synthesised constructor ("Conflicting overloads"
+// / "Overload resolution ambiguity") on Kotlin/Wasm.
 internal data class {{ ffi_struct.name()|ffi_struct_name }}UniffiByValue(
     {%- for field in ffi_struct.fields() %}
     internal val {{ field.name()|var_name }}: {{ field.type_().borrow()|ffi_type_name_for_ffi_struct(ci) }},
     {%- endfor %}
 )
-
-internal fun {{ ffi_struct.name()|ffi_struct_name }}UniffiByValue(
-    {%- for field in ffi_struct.fields() %}
-    {{ field.name()|var_name }}: {{ field.type_().borrow()|ffi_type_name_for_ffi_struct(ci) }},
-    {%- endfor %}
-): {{ ffi_struct.name()|ffi_struct_name }}UniffiByValue {
-    return {{ ffi_struct.name()|ffi_struct_name }}UniffiByValue(
-        {%- for field in ffi_struct.fields() %}
-        {{ field.name()|var_name }} = {{ field.name()|var_name }},
-        {%- endfor %}
-    )
-}
 
 {%- when FfiDefinition::Function(_) %}
 {# functions are handled below #}

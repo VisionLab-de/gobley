@@ -19,9 +19,15 @@
 /** Pointer width on wasm32; revisit if memory64 ever ships. */
 internal const val WASM_POINTER_SIZE_BYTES: Int = 4
 
-@kotlin.jvm.JvmInline
+// `value class` is sufficient on Kotlin/Wasm — `@kotlin.jvm.JvmInline` is an
+// `@OptionalExpectation` that only resolves on JVM/Android source sets.
+//
+// The companion takes the same visibility as `RustBuffer` itself: the
+// `RustBuffer.Companion.from(...)` extension below is also emitted with
+// `{{ visibility() }}`, and a `public` extension on an `internal` receiver
+// trips "'public' member exposes its 'internal' receiver type 'Companion'".
 {{ visibility() }}value class RustBuffer(internal val ptr: Pointer) {
-    internal companion object {
+    {{ visibility() }}companion object {
         internal const val SIZE_BYTES: Int = 12
         internal const val OFFSET_CAPACITY: Int = 0
         internal const val OFFSET_LEN: Int = 4
