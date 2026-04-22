@@ -361,3 +361,211 @@ impl Transformer {
         bindings
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Synth-WASM tests for the Kotlin/Wasm `.mjs` shim renderer.
+    //!
+    //! Locks the contract between `Transformer::render_into_mjs` and the
+    //! Kotlin/Wasm bindgen output (see `wasm-js/CallbackInterfaceImpl.kt` and
+    //! `wasm-js/Async.kt`): every Rust import under the well-known
+    //! `gobley_callbacks` module must surface as both a `KOTLIN_CALLBACK_EXPORTS`
+    //! entry and a `RUST_IMPORTS_TO_BIND` entry, and the shim must always emit
+    //! the `init` entrypoint plus the optional `__indirect_function_table`
+    //! pickup that the T0.C.1 spike relies on.
+    //!
+    //! These tests construct a minimal walrus `Module` rather than checking in
+    //! a `.wasm` fixture so a wasm-tools/toolchain bump never silently breaks
+    //! them. Bytes round-trip through `Module::emit_wasm` -> `Transformer::new`
+    //! -> `render_into_mjs`, which is exactly the path the production
+    //! `gobley-wasm-transformer` CLI takes minus the read-from-disk step.
+
+    use super::*;
+    use walrus::{FunctionBuilder, Module, ValType};
+
+    /// Construct a tiny WASM cdylib analogue: one local `memory` export, three
+    /// `gobley_callbacks` imports (one async-continuation plus two per-interface
+    /// dispatchers, mirroring the production layout from coverall +
+    /// `Async.kt`), one stray non-callback import to confirm filtering, and a
+    /// single local function so emitted modules carry a code section.
+    fn build_test_wasm() -> Vec<u8> {
+        let mut module = Module::default();
+
+        // Rust-side `memory` export — the .mjs shim asserts on its presence.
+        let mem_id = module.memories.add_local(false, false, 1, None, None);
+        module.exports.add("memory", mem_id);
+
+        // Three callback imports under the well-known module name. Names
+        // follow the bindgen convention from `wasm-js/CallbackInterfaceImpl.kt`
+        // and `wasm-js/Async.kt`. Order is intentional: shuffled so we can
+        // assert the renderer preserves declaration order in the emitted
+        // `RUST_IMPORTS_TO_BIND` array.
+        let cb_async_ty = module.types.add(&[ValType::I64, ValType::I32], &[]);
+        module.add_import_func(
+            GOBLEY_CALLBACKS_MODULE,
+            "gobley_async_continuation_callback",
+            cb_async_ty,
+        );
+        let cb_iface_ty = module
+            .types
+            .add(&[ValType::I64, ValType::I32, ValType::I32], &[]);
+        module.add_import_func(
+            GOBLEY_CALLBACKS_MODULE,
+            "gobley_callback_Foo_bar",
+            cb_iface_ty,
+        );
+        module.add_import_func(
+            GOBLEY_CALLBACKS_MODULE,
+            "gobley_callback_Foo_uniffi_free",
+            cb_iface_ty,
+        );
+
+        // A non-callback import to confirm the renderer ignores anything
+        // outside `gobley_callbacks` (e.g. wasi-side `env` calls).
+        let noop_ty = module.types.add(&[], &[]);
+        module.add_import_func("env", "should_not_appear_in_shim", noop_ty);
+
+        // Minimal local function + export. `__indirect_function_table` is
+        // intentionally NOT emitted: the .mjs shim must tolerate its absence
+        // (`-C link-arg=--export-table` is documented as optional per spike).
+        let mut builder = FunctionBuilder::new(&mut module.types, &[], &[]);
+        builder.func_body();
+        let local_id = builder.finish(vec![], &mut module.funcs);
+        module.exports.add("uniffi_test_init", local_id);
+
+        module.emit_wasm()
+    }
+
+    #[test]
+    fn render_into_mjs_emits_callback_bindings() {
+        let wasm = build_test_wasm();
+        let transformer =
+            Transformer::new(&wasm, vec![]).expect("walrus must accept the synthesized module");
+        let mjs = transformer
+            .render_into_mjs("synth_crate")
+            .expect("render must succeed for a well-formed module");
+
+        // Crate name flows into the doc header.
+        assert!(
+            mjs.contains("`synth_crate`"),
+            "missing crate-name doc header: {mjs}"
+        );
+
+        // Every gobley_callbacks import must surface in both arrays.
+        for name in [
+            "gobley_async_continuation_callback",
+            "gobley_callback_Foo_bar",
+            "gobley_callback_Foo_uniffi_free",
+        ] {
+            assert!(
+                mjs.contains(&format!("\"{name}\"")),
+                "KOTLIN_CALLBACK_EXPORTS missing `{name}`: {mjs}"
+            );
+            assert!(
+                mjs.contains(&format!("name: \"{name}\"")),
+                "RUST_IMPORTS_TO_BIND missing `{name}`: {mjs}"
+            );
+        }
+
+        // Non-callback imports must NOT leak into either array.
+        assert!(
+            !mjs.contains("should_not_appear_in_shim"),
+            "non-`gobley_callbacks` import leaked into shim: {mjs}"
+        );
+
+        // Public surface the bindgen consumers depend on.
+        assert!(
+            mjs.contains("export async function init("),
+            "missing init export"
+        );
+        assert!(
+            mjs.contains("globalThis.__gobleyWasmMemory"),
+            "missing memory view global"
+        );
+        assert!(
+            mjs.contains("globalThis.__gobleyRustExports"),
+            "missing exports global"
+        );
+        assert!(
+            mjs.contains("__indirect_function_table"),
+            "missing optional vtable table pickup (T0.C.1 spike)"
+        );
+        assert!(
+            mjs.contains("gobley_callbacks"),
+            "missing gobley_callbacks module ref"
+        );
+    }
+
+    #[test]
+    fn render_into_mjs_handles_zero_callback_imports() {
+        // Rust crates without any callback interfaces still need the shim
+        // (init + memory bridge). Verify the renderer produces a usable
+        // module rather than an empty file or a syntax error.
+        let mut module = Module::default();
+        let mem_id = module.memories.add_local(false, false, 1, None, None);
+        module.exports.add("memory", mem_id);
+
+        let mut builder = FunctionBuilder::new(&mut module.types, &[], &[]);
+        builder.func_body();
+        let local_id = builder.finish(vec![], &mut module.funcs);
+        module.exports.add("uniffi_no_callbacks", local_id);
+
+        let wasm = module.emit_wasm();
+        let transformer =
+            Transformer::new(&wasm, vec![]).expect("walrus must accept callback-less module");
+        let mjs = transformer
+            .render_into_mjs("no_callbacks_crate")
+            .expect("render must succeed even with zero callback imports");
+
+        assert!(
+            mjs.contains("export async function init("),
+            "init still required"
+        );
+        assert!(
+            mjs.contains("KOTLIN_CALLBACK_EXPORTS"),
+            "array still declared"
+        );
+        assert!(mjs.contains("RUST_IMPORTS_TO_BIND"), "array still declared");
+        assert!(
+            mjs.contains("`no_callbacks_crate`"),
+            "crate name still in header"
+        );
+    }
+
+    #[test]
+    fn render_into_mjs_preserves_import_order() {
+        // The renderer documents that import order matches the WASM section
+        // order so generated diffs stay reviewable. Lock that contract.
+        let mut module = Module::default();
+        let mem_id = module.memories.add_local(false, false, 1, None, None);
+        module.exports.add("memory", mem_id);
+
+        let ty = module.types.add(&[], &[]);
+        for name in [
+            "gobley_callback_Z_x",
+            "gobley_callback_A_y",
+            "gobley_callback_M_z",
+        ] {
+            module.add_import_func(GOBLEY_CALLBACKS_MODULE, name, ty);
+        }
+
+        let wasm = module.emit_wasm();
+        let transformer = Transformer::new(&wasm, vec![]).unwrap();
+        let mjs = transformer.render_into_mjs("ordered").unwrap();
+
+        // KOTLIN_CALLBACK_EXPORTS is sorted for deterministic JS, but
+        // RUST_IMPORTS_TO_BIND must reflect declaration order so the host
+        // can spot regressions in the linker's import-section layout.
+        let pos_z = mjs
+            .find("name: \"gobley_callback_Z_x\"")
+            .expect("Z_x present");
+        let pos_a = mjs
+            .find("name: \"gobley_callback_A_y\"")
+            .expect("A_y present");
+        let pos_m = mjs
+            .find("name: \"gobley_callback_M_z\"")
+            .expect("M_z present");
+        assert!(pos_z < pos_a, "import order Z then A must be preserved");
+        assert!(pos_a < pos_m, "import order A then M must be preserved");
+    }
+}
