@@ -80,6 +80,9 @@ impl BindingGenerator for KotlinBindingGenerator {
             if let Some(stub) = bindings.stub {
                 write_bindings_target(ci, settings, config, "stub", stub);
             }
+            if let Some(wasm_js) = bindings.wasm_js {
+                write_bindings_target(ci, settings, config, "wasmJs", wasm_js);
+            }
 
             if let Some(header) = bindings.header {
                 write_cinterop(ci, &settings.out_dir, header);

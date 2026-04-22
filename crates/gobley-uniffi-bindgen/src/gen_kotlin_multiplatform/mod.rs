@@ -95,6 +95,8 @@ pub enum ConfigKotlinTarget {
     Native,
     #[serde(rename = "stub")]
     Stub,
+    #[serde(rename = "wasmJs")]
+    WasmJs,
 }
 
 // config options to customize the generated Kotlin.
@@ -274,6 +276,7 @@ pub struct MultiplatformBindings {
     pub android: Option<String>,
     pub native: Option<String>,
     pub stub: Option<String>,
+    pub wasm_js: Option<String>,
     pub header: Option<String>,
 }
 
@@ -327,6 +330,13 @@ pub fn generate_bindings(
             .context("failed to render stub bindings")
     })?;
 
+    let wasm_js = run_with_target(config, ConfigKotlinTarget::WasmJs, || {
+        WasmJsKotlinWrapper::new("wasmJs", Some(Visibility::Public), config.clone(), ci)
+            .context("failed to create a Kotlin/Wasm-JS binding generator")?
+            .render()
+            .context("failed to render Kotlin/Wasm-JS bindings")
+    })?;
+
     let header = run_with_target(config, ConfigKotlinTarget::Native, || {
         HeadersKotlinWrapper::new("headers", Some(Visibility::Public), config.clone(), ci)
             .context("failed to create a native header binding generator")?
@@ -340,6 +350,7 @@ pub fn generate_bindings(
         android,
         native,
         stub,
+        wasm_js,
         header,
     })
 }
@@ -535,6 +546,9 @@ kotlin_wrapper!(NativeKotlinWrapper, NativeTypeRenderer, "native/wrapper.kt");
 
 kotlin_type_renderer!(StubTypeRenderer, "stub/Types.kt");
 kotlin_wrapper!(StubKotlinWrapper, StubTypeRenderer, "stub/wrapper.kt");
+
+kotlin_type_renderer!(WasmJsTypeRenderer, "wasm-js/Types.kt");
+kotlin_wrapper!(WasmJsKotlinWrapper, WasmJsTypeRenderer, "wasm-js/wrapper.kt");
 
 kotlin_type_renderer!(HeadersTypeRenderer, "headers/Types.h");
 kotlin_wrapper!(
