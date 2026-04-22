@@ -53,6 +53,8 @@
                         {%-     when Some(throwable) %}
                         {%-         if module_name != "wasmJs" %}
 {{ " "|repeat(indent) }}@Throws({{ throwable|type_name(ci) }}::class {%- if callable.is_async() -%}, kotlin.coroutines.cancellation.CancellationException::class{%- endif -%})
+                        {%-         else %}
+{{ " "|repeat(indent) }}@Suppress("ACTUAL_ANNOTATIONS_NOT_MATCH_EXPECT")
                         {%-         endif %}
                         {%-     else -%}
                         {%- endmatch %}
@@ -73,6 +75,8 @@
                         {%-     when Some(throwable) %}
                         {%-         if module_name != "wasmJs" %}
 {{ " "|repeat(indent) }}@Throws({{ throwable|type_name(ci) }}::class {%- if callable.is_async() -%}, kotlin.coroutines.cancellation.CancellationException::class{%- endif -%})
+                        {%-         else %}
+{{ " "|repeat(indent) }}@Suppress("ACTUAL_ANNOTATIONS_NOT_MATCH_EXPECT")
                         {%-         endif %}
                         {%-     else -%}
                         {%- endmatch %}
