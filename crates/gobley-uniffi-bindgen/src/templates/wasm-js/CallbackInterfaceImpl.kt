@@ -71,7 +71,7 @@ internal object {{ trait_impl }} {
     // pattern — `uniffiOutReturn.setValue(...)` dispatches to
     // `RustBuffer.setValue` (shared FFI template) for `RustBuffer`
     // returns, or to the `*ByReference.setValue` extensions in
-    // `HandleMap.kt` for primitives.
+    // `ReferenceHelper.kt` for primitives.
     internal fun {{ meth.name()|var_name }}(
         {%- call kt::arg_list_ffi_decl(ffi_callback, 8) %}
     )
@@ -117,11 +117,61 @@ internal object {{ trait_impl }} {
         {%- endmatch %}
 
         {%- else %}
-        // TODO(T0.C.5): foreign-future async callback path. Mirror
-        // native/Async.kt structure (continuation handle in HandleMap +
-        // `uniffiFutureCallback` invocation) once the foreign-future
-        // FFI struct write helpers exist.
-        TODO("Async callback path filled in at T0.C.5")
+        // Async callback dispatch — mirrors the JVM/Native foreign-future
+        // pattern in those targets' `CallbackInterfaceImpl.kt`. The
+        // shared `ffi/Async.kt` provides `uniffiTraitInterfaceCallAsync`
+        // / `uniffiTraitInterfaceCallAsyncWithError`, which `launch` the
+        // suspending `makeCall` on `GlobalScope` (single-threaded JS
+        // event loop — no thread switch), register the resulting `Job`
+        // in `uniffiForeignFutureHandleMap`, and return a
+        // `UniffiForeignFutureUniffiByValue` whose `free` slot points to
+        // `uniffiForeignFutureFreeImpl` (see `Async.kt`).
+        //
+        // `uniffiFutureCallback` is a Kotlin function-type alias on
+        // Wasm (vs. `Callback.callback()` on JVM / `invoke()` on
+        // Native), so we invoke it with plain call syntax.
+        // `uniffiFutureCallback` (a function reference) travels through
+        // the FFI as an i32 table index; the Kotlin side stores the
+        // typealias-typed value and the JS shim forwards the actual
+        // `call_indirect` dispatch via the cached table index — same
+        // mechanism as `uniffiRustFutureContinuationCallbackCallback`.
+        val uniffiHandleSuccess = { {% if meth.return_type().is_some() %}returnValue{% else %}_{% endif %}: {% match meth.return_type() %}{%- when Some(return_type) %}{{ return_type|type_name(ci) }}{%- when None %}Unit{% endmatch %} ->
+            val uniffiResult = {{ meth.foreign_future_ffi_result_struct().name()|ffi_struct_name }}UniffiByValue(
+                {%- if let Some(return_type) = meth.return_type() %}
+                {{ return_type|lower_fn }}(returnValue),
+                {%- endif %}
+                UniffiRustCallStatusHelper.allocValue(),
+            )
+            uniffiFutureCallback(uniffiCallbackData, uniffiResult)
+        }
+        val uniffiHandleError = { callStatus: UniffiRustCallStatusByValue ->
+            uniffiFutureCallback(
+                uniffiCallbackData,
+                {{ meth.foreign_future_ffi_result_struct().name()|ffi_struct_name }}UniffiByValue(
+                    {%- if let Some(return_type) = meth.return_type() %}
+                    {{ return_type.into()|ffi_default_value }},
+                    {%- endif %}
+                    callStatus,
+                ),
+            )
+        }
+
+        uniffiOutReturn.uniffiSetValue(
+            {%- match meth.throws_type() %}
+            {%- when None %}
+            uniffiTraitInterfaceCallAsync(
+                makeCall,
+                uniffiHandleSuccess,
+                uniffiHandleError,
+            )
+            {%- when Some(error_type) %}
+            uniffiTraitInterfaceCallAsyncWithError(
+                makeCall,
+                uniffiHandleSuccess,
+                uniffiHandleError,
+            ) { e: {{error_type|type_name(ci) }} -> {{ error_type|lower_fn }}(e) }
+            {%- endmatch %}
+        )
         {%- endif %}
     }
     {% endfor %}

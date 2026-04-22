@@ -38,6 +38,7 @@ package {{ config.package_name() }}
 {% include "ffi/FfiConverterTemplate.kt" %}
 {% include "Helpers.kt" %}
 {% include "HandleMap.kt" %}
+{% include "ReferenceHelper.kt" %}
 
 // Contains loading, initialization code,
 // and the FFI Function declarations.
