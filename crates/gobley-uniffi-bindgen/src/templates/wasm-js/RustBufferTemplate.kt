@@ -2,19 +2,35 @@
 
 // RustBuffer for Kotlin/Wasm.
 //
-// In Rust the layout is `{ capacity: u32, len: u32, data: *mut u8 }` (12 bytes).
+// In Rust the layout (uniffi_core 0.29.5 `ffi/rustbuffer.rs:51-62`) is:
+//
+//   #[repr(C)] struct RustBuffer { capacity: u64, len: u64, data: *mut u8 }
+//
+// On wasm32 the C ABI lays this out as:
+//   * offset  0: capacity (i64)               — 8 bytes
+//   * offset  8: len      (i64)               — 8 bytes
+//   * offset 16: data     (i32 wasm pointer)  — 4 bytes
+//   * offset 20: tail pad (4 bytes — struct alignment is 8 because of u64)
+//   * total: 24 bytes
+//
+// Verified by `wasm-tools print` of `ffi_<crate>_rustbuffer_alloc` (the
+// outer trampoline writes `i64.store offset=0/8`, `i32.store offset=16/20`
+// to the caller's sret slot and the inner `uniffi_rustbuffer_alloc` reads
+// `i64.load offset=8/16` + `i32.load offset=24/28` from its own sret slot).
+//
 // We follow T0.B Decision 2:
 //   * `RustBuffer` = a 1-i32 value class wrapping the i32 pointer to that
-//     12-byte struct in *Rust* linear memory.
-//   * `RustBufferByValue` = a Kotlin data class of the three i32 fields
-//     (re-typed to `Long` for byte-for-byte API compat with JVM/Native),
-//     used for direct-passed `RustBuffer` arguments (uniffi often passes
-//     RustBuffers by value, struct-flattened across the FFI).
+//     24-byte struct in *Rust* linear memory.
+//   * `RustBufferByValue` = a Kotlin data class of the three logical fields
+//     (capacity/len as `Long` for byte-for-byte API compat with JVM/Native;
+//     data as nullable `Pointer`), used for direct-passed `RustBuffer`
+//     arguments (uniffi often passes RustBuffers by value, struct-flattened
+//     across the FFI).
 //
 // `capacity` and `len` are exposed as `Long` for byte-for-byte API
 // compatibility with the JVM/Native templates (which sign-extend u64 to
-// `Long`). On Wasm they're really u32, so we mask off the high bits when
-// converting from `Long` back to `Int` for the underlying wasm calls.
+// `Long`). The accessors below read/write the full i64 via
+// `WasmMemoryView.getLong/setLong`.
 
 /** Pointer width on wasm32; revisit if memory64 ever ships. */
 internal const val WASM_POINTER_SIZE_BYTES: Int = 4
@@ -28,20 +44,20 @@ internal const val WASM_POINTER_SIZE_BYTES: Int = 4
 // trips "'public' member exposes its 'internal' receiver type 'Companion'".
 {{ visibility() }}value class RustBuffer(internal val ptr: Pointer) {
     {{ visibility() }}companion object {
-        internal const val SIZE_BYTES: Int = 12
+        internal const val SIZE_BYTES: Int = 24
         internal const val OFFSET_CAPACITY: Int = 0
-        internal const val OFFSET_LEN: Int = 4
-        internal const val OFFSET_DATA: Int = 8
+        internal const val OFFSET_LEN: Int = 8
+        internal const val OFFSET_DATA: Int = 16
     }
 }
 
 {{ visibility() }}var RustBuffer.capacity: Long
-    get() = WasmMemoryView.getInt(ptr + RustBuffer.OFFSET_CAPACITY).toLong() and 0xFFFFFFFFL
-    set(value) { WasmMemoryView.setInt(ptr + RustBuffer.OFFSET_CAPACITY, value.toInt()) }
+    get() = WasmMemoryView.getLong(ptr + RustBuffer.OFFSET_CAPACITY)
+    set(value) { WasmMemoryView.setLong(ptr + RustBuffer.OFFSET_CAPACITY, value) }
 
 {{ visibility() }}var RustBuffer.len: Long
-    get() = WasmMemoryView.getInt(ptr + RustBuffer.OFFSET_LEN).toLong() and 0xFFFFFFFFL
-    set(value) { WasmMemoryView.setInt(ptr + RustBuffer.OFFSET_LEN, value.toInt()) }
+    get() = WasmMemoryView.getLong(ptr + RustBuffer.OFFSET_LEN)
+    set(value) { WasmMemoryView.setLong(ptr + RustBuffer.OFFSET_LEN, value) }
 
 {{ visibility() }}var RustBuffer.data: Pointer?
     get() {

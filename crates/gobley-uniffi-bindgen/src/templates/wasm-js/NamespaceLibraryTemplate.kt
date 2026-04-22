@@ -27,6 +27,12 @@ Unit
 // FFI struct `{{ ffi_struct.name() }}` — backing layout lives in Rust
 // linear memory; Kotlin side carries a pointer + extension accessors.
 //
+// Field offsets are computed in `gen_kotlin_multiplatform::wasm_layout`
+// per the wasm32 `#[repr(C)]` ABI (RustBuffer = 24 bytes align 8;
+// RustCallStatus = 32 bytes align 8; primitives align to size). See
+// the `wasm_field_offset/getter/setter` askama filters in
+// `gen_kotlin_multiplatform::filters`.
+//
 // `value class` only — `@kotlin.jvm.JvmInline` is an `@OptionalExpectation`
 // that only resolves on JVM/Android source sets, so emitting it on the
 // wasmJs target trips "Declaration annotated with '@OptionalExpectation'
@@ -35,13 +41,9 @@ internal value class {{ ffi_struct.name()|ffi_struct_name }}(internal val ptr: P
 
 {%- for field in ffi_struct.fields() %}
 internal var {{ ffi_struct.name()|ffi_struct_name }}.{{ field.name()|var_name }}: {{ field.type_().borrow()|ffi_type_name_for_ffi_struct(ci) }}
-    get() {
-        // TODO(T0.C.3): WasmMemoryView read at correct offset for `{{ field.name() }}`.
-        TODO("FFI struct field accessor wired up in T0.C.3")
-    }
+    get() = {{ field|wasm_field_getter(ffi_struct) }}
     set(value) {
-        // TODO(T0.C.3): WasmMemoryView write at correct offset for `{{ field.name() }}`.
-        TODO("FFI struct field accessor wired up in T0.C.3")
+        {{ field|wasm_field_setter(ffi_struct) }}
     }
 {%- endfor %}
 

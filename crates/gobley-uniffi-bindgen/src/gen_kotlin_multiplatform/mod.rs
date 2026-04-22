@@ -940,6 +940,254 @@ pub enum DataClassFieldType {
     NullableNonBytes,
 }
 
+
+/// Wasm32 C ABI memory layout helpers for FFI struct codegen (Kotlin/Wasm target).
+///
+/// Mirror Rust's `#[repr(C)]` layout rules on wasm32:
+///   * each field is aligned to its alignment requirement (next multiple of `align`),
+///   * total size of the struct is rounded up to the struct alignment (max field align).
+///
+/// All sizes/alignments below are for the wasm32-unknown-unknown ABI:
+///   * pointers / function-pointers are i32 (size 4, align 4),
+///   * i64/u64/f64 are size 8, align 8 (per the wasm C ABI),
+///   * `RustBuffer` flattens to `{u64 capacity, u64 len, *mut u8 data}` →
+///     20 bytes payload, but struct align 8 because of the leading u64,
+///     so the in-memory footprint is 24 bytes (4 bytes tail pad).
+///   * `RustCallStatus` flattens to `{i8 code, RustBuffer error_buf}` →
+///     1 byte + 7 byte pad + 24 byte RustBuffer = 32 bytes, align 8.
+///
+/// Cross-checked against `wasm-tools print` of `ffi_<crate>_rustbuffer_alloc`
+/// in `target/wasm32-unknown-unknown/debug/gobley_fixture_coverall.wasm`
+/// (T0.C.3.b.1 verification).
+mod wasm_layout {
+    use uniffi_bindgen::interface::{FfiField, FfiStruct, FfiType};
+
+    /// Size in bytes occupied by `ty` in a `#[repr(C)]` struct on wasm32.
+    pub(super) fn size_of(ty: &FfiType) -> usize {
+        match ty {
+            FfiType::Int8 | FfiType::UInt8 => 1,
+            FfiType::Int16 | FfiType::UInt16 => 2,
+            FfiType::Int32
+            | FfiType::UInt32
+            | FfiType::Float32
+            | FfiType::RustArcPtr(_)
+            | FfiType::Callback(_)
+            | FfiType::Reference(_)
+            | FfiType::MutReference(_)
+            | FfiType::VoidPointer => 4,
+            FfiType::Int64 | FfiType::UInt64 | FfiType::Float64 | FfiType::Handle => 8,
+            // RustBuffer = {u64, u64, *u8} on wasm32 = 24 bytes (4-byte tail pad,
+            // struct align 8 because of the leading u64).
+            FfiType::RustBuffer(_) => 24,
+            // RustCallStatus = {i8 code, RustBuffer error_buf} = 1 + 7 pad + 24 = 32.
+            FfiType::RustCallStatus => 32,
+            // ForeignBytes = {i32 len, *u8 data} = 8 bytes, align 4.
+            FfiType::ForeignBytes => 8,
+            // For nested FFI structs we'd need to look up the FfiStruct to compute
+            // its size from its fields. None of the FFI structs uniffi 0.29.5 emits
+            // contain nested by-value FFI structs other than RustBuffer / RustCallStatus
+            // (both handled above), so this branch is unreachable for the 0.29.5 ABI.
+            FfiType::Struct(name) => {
+                unimplemented!("nested by-value FfiStruct field on wasm32 ({name})")
+            }
+        }
+    }
+
+    /// Alignment in bytes of `ty` in a `#[repr(C)]` struct on wasm32.
+    pub(super) fn align_of(ty: &FfiType) -> usize {
+        match ty {
+            FfiType::Int8 | FfiType::UInt8 => 1,
+            FfiType::Int16 | FfiType::UInt16 => 2,
+            FfiType::Int32
+            | FfiType::UInt32
+            | FfiType::Float32
+            | FfiType::RustArcPtr(_)
+            | FfiType::Callback(_)
+            | FfiType::Reference(_)
+            | FfiType::MutReference(_)
+            | FfiType::VoidPointer => 4,
+            FfiType::Int64 | FfiType::UInt64 | FfiType::Float64 | FfiType::Handle => 8,
+            // Both RustBuffer and RustCallStatus carry a u64, so align 8.
+            FfiType::RustBuffer(_) | FfiType::RustCallStatus => 8,
+            FfiType::ForeignBytes => 4,
+            FfiType::Struct(name) => {
+                unimplemented!("nested by-value FfiStruct field on wasm32 ({name})")
+            }
+        }
+    }
+
+    /// Compute the byte offset of every field in `s` per wasm32 `#[repr(C)]`
+    /// rules. The returned vector has the same length as `s.fields()`; index
+    /// `i` is the offset of field `s.fields()[i]`.
+    pub(super) fn field_offsets(s: &FfiStruct) -> Vec<usize> {
+        let mut offset: usize = 0;
+        let mut offsets = Vec::with_capacity(s.fields().len());
+        for field in s.fields() {
+            let align = align_of(&field.type_());
+            offset = align_up(offset, align);
+            offsets.push(offset);
+            offset += size_of(&field.type_());
+        }
+        offsets
+    }
+
+    /// Find the offset of `field` inside `parent`. Linear scan — FFI structs
+    /// have a handful of fields, so the cost is negligible at codegen time.
+    /// Returns `None` if `field` is not a field of `parent` (caller bug).
+    pub(super) fn offset_of(field: &FfiField, parent: &FfiStruct) -> Option<usize> {
+        let offsets = field_offsets(parent);
+        parent
+            .fields()
+            .iter()
+            .position(|f| f.name() == field.name())
+            .map(|idx| offsets[idx])
+    }
+
+    fn align_up(offset: usize, align: usize) -> usize {
+        // align is a power of two for all FFI types we handle (1, 2, 4, 8).
+        debug_assert!(align.is_power_of_two(), "non-pow2 align: {align}");
+        (offset + align - 1) & !(align - 1)
+    }
+
+    /// Render a Kotlin getter expression that reads a field of `ty` from
+    /// memory at `base + offset`, returning the wasm-js Kotlin type for `ty`.
+    ///
+    /// The returned expression is a single Kotlin expression suitable for
+    /// emission inside the generated property `get()` body. For composite
+    /// types (RustBuffer, RustCallStatus) the expression is a constructor
+    /// call wrapping multiple field reads.
+    pub(super) fn render_field_getter(ty: &FfiType, base: &str, offset: usize) -> String {
+        match ty {
+            FfiType::Int8 | FfiType::UInt8 => {
+                format!("WasmMemoryView.getByte({base} + {offset})")
+            }
+            // No native getShort/setShort on WasmMemoryView yet; emulate with
+            // two big-endian byte reads (matches the pattern used by
+            // ShortByReference and ByteBuffer.getShort in this target). The
+            // two-byte sequence will need to flip to little-endian once the
+            // WasmMemoryView shim is fixed for wasm-native byte order
+            // (T0.C.6.x: full LE audit).
+            FfiType::Int16 | FfiType::UInt16 => format!(
+                "(((WasmMemoryView.getByte({base} + {offset}).toInt() and 0xff) shl 8) or \
+                 (WasmMemoryView.getByte({base} + {offset} + 1).toInt() and 0xff)).toShort()"
+            ),
+            FfiType::Int32 | FfiType::UInt32 => {
+                format!("WasmMemoryView.getInt({base} + {offset})")
+            }
+            FfiType::Int64 | FfiType::UInt64 | FfiType::Handle => {
+                format!("WasmMemoryView.getLong({base} + {offset})")
+            }
+            FfiType::Float32 => format!("WasmMemoryView.getFloat({base} + {offset})"),
+            FfiType::Float64 => format!("WasmMemoryView.getDouble({base} + {offset})"),
+            // Pointer-shaped types: i32 read, with `0` lifted to `null` for
+            // nullable `Pointer?` Kotlin types.
+            FfiType::RustArcPtr(_) => format!(
+                "WasmMemoryView.getInt({base} + {offset}).let {{ if (it == 0) null else it }}"
+            ),
+            // Callback fields are typed as the Kotlin function typealias
+            // (e.g. `UniffiForeignFutureFree?` = `((Long) -> Unit)?`). Wasm
+            // memory carries an i32 (the rust-side `__indirect_function_table`
+            // index per the T0.C.1 spike), but Kotlin/Wasm cannot materialize
+            // a function value from an i32 — the round-trip must go through
+            // the Kotlin-side HandleMap that T0.C.4 wires up. For now stub
+            // both halves with a runtime TODO; the property type is what the
+            // generated `UniffiByValue` data class declares, so dropping it
+            // would shift the type mismatch elsewhere.
+            FfiType::Callback(_) => {
+                let _ = (base, offset);
+                "TODO(\"Callback FFI struct field accessor wired by T0.C.4 callback dispatch\")".to_string()
+            }
+            FfiType::Reference(_) | FfiType::MutReference(_) | FfiType::VoidPointer => {
+                format!("WasmMemoryView.getInt({base} + {offset})")
+            }
+            // RustBuffer field: read three sub-fields at known offsets,
+            // construct RustBufferByValue. Mirror the inline expansion in
+            // wasm-js/Helpers.kt:errorBuf getter.
+            FfiType::RustBuffer(_) => format!(
+                "RustBufferByValue(\n\
+                 \x20           capacity = WasmMemoryView.getLong(({base} + {offset}) + RustBuffer.OFFSET_CAPACITY),\n\
+                 \x20           len = WasmMemoryView.getLong(({base} + {offset}) + RustBuffer.OFFSET_LEN),\n\
+                 \x20           data = WasmMemoryView.getInt(({base} + {offset}) + RustBuffer.OFFSET_DATA).let {{ if (it == 0) null else it }},\n\
+                 \x20       )"
+            ),
+            // RustCallStatus field: i8 code at field-base+0, RustBuffer at field-base+8.
+            FfiType::RustCallStatus => format!(
+                "UniffiRustCallStatusByValue(\n\
+                 \x20           code = WasmMemoryView.getByte(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_CODE),\n\
+                 \x20           errorBuf = RustBufferByValue(\n\
+                 \x20               capacity = WasmMemoryView.getLong(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_ERROR_BUF + RustBuffer.OFFSET_CAPACITY),\n\
+                 \x20               len = WasmMemoryView.getLong(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_ERROR_BUF + RustBuffer.OFFSET_LEN),\n\
+                 \x20               data = WasmMemoryView.getInt(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_ERROR_BUF + RustBuffer.OFFSET_DATA).let {{ if (it == 0) null else it }},\n\
+                 \x20           ),\n\
+                 \x20       )"
+            ),
+            FfiType::ForeignBytes => format!(
+                "ForeignBytesByValue(\n\
+                 \x20           len = WasmMemoryView.getInt({base} + {offset}),\n\
+                 \x20           data = WasmMemoryView.getInt(({base} + {offset}) + 4).let {{ if (it == 0) null else it }},\n\
+                 \x20       )"
+            ),
+            FfiType::Struct(name) => {
+                unimplemented!("nested by-value FfiStruct field getter ({name})")
+            }
+        }
+    }
+
+    /// Render a Kotlin setter body that writes `value` (a Kotlin local of the
+    /// wasm-js Kotlin type for `ty`) to memory at `base + offset`. The
+    /// returned string is a sequence of statements suitable for emission
+    /// inside the generated property `set(value)` body.
+    pub(super) fn render_field_setter(ty: &FfiType, base: &str, offset: usize) -> String {
+        match ty {
+            FfiType::Int8 | FfiType::UInt8 => {
+                format!("WasmMemoryView.setByte({base} + {offset}, value)")
+            }
+            FfiType::Int16 | FfiType::UInt16 => format!(
+                "WasmMemoryView.setByte({base} + {offset}, ((value.toInt() ushr 8) and 0xff).toByte())\n\
+                 \x20       WasmMemoryView.setByte({base} + {offset} + 1, (value.toInt() and 0xff).toByte())"
+            ),
+            FfiType::Int32 | FfiType::UInt32 => {
+                format!("WasmMemoryView.setInt({base} + {offset}, value)")
+            }
+            FfiType::Int64 | FfiType::UInt64 | FfiType::Handle => {
+                format!("WasmMemoryView.setLong({base} + {offset}, value)")
+            }
+            FfiType::Float32 => format!("WasmMemoryView.setFloat({base} + {offset}, value)"),
+            FfiType::Float64 => format!("WasmMemoryView.setDouble({base} + {offset}, value)"),
+            FfiType::RustArcPtr(_) => {
+                format!("WasmMemoryView.setInt({base} + {offset}, value ?: 0)")
+            }
+            // See the matching `Callback(_)` arm in `render_field_getter`:
+            // wasm memory holds an i32 vtable index, not a function value.
+            // T0.C.4 will route writes through the Kotlin HandleMap.
+            FfiType::Callback(_) => {
+                let _ = (base, offset);
+                "TODO(\"Callback FFI struct field accessor wired by T0.C.4 callback dispatch\")".to_string()
+            }
+            FfiType::Reference(_) | FfiType::MutReference(_) | FfiType::VoidPointer => {
+                format!("WasmMemoryView.setInt({base} + {offset}, value)")
+            }
+            FfiType::RustBuffer(_) => format!(
+                "WasmMemoryView.setLong(({base} + {offset}) + RustBuffer.OFFSET_CAPACITY, value.capacity)\n\
+                 \x20       WasmMemoryView.setLong(({base} + {offset}) + RustBuffer.OFFSET_LEN, value.len)\n\
+                 \x20       WasmMemoryView.setInt(({base} + {offset}) + RustBuffer.OFFSET_DATA, value.data ?: 0)"
+            ),
+            FfiType::RustCallStatus => format!(
+                "WasmMemoryView.setByte(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_CODE, value.code)\n\
+                 \x20       WasmMemoryView.setLong(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_ERROR_BUF + RustBuffer.OFFSET_CAPACITY, value.errorBuf.capacity)\n\
+                 \x20       WasmMemoryView.setLong(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_ERROR_BUF + RustBuffer.OFFSET_LEN, value.errorBuf.len)\n\
+                 \x20       WasmMemoryView.setInt(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_ERROR_BUF + RustBuffer.OFFSET_DATA, value.errorBuf.data ?: 0)"
+            ),
+            FfiType::ForeignBytes => format!(
+                "WasmMemoryView.setInt({base} + {offset}, value.len)\n\
+                 \x20       WasmMemoryView.setInt(({base} + {offset}) + 4, value.data ?: 0)"
+            ),
+            FfiType::Struct(name) => {
+                unimplemented!("nested by-value FfiStruct field setter ({name})")
+            }
+        }
+    }
+}
 mod filters {
     pub use uniffi_bindgen::backend::filters::*;
     use uniffi_bindgen::{backend::filters::to_askama_error, interface::ffi::ExternalFfiMetadata};
@@ -1327,6 +1575,54 @@ mod filters {
     /// Get the idiomatic Kotlin rendering of an FFI struct name
     pub fn ffi_struct_name<S: AsRef<str>>(nm: S) -> Result<String, askama::Error> {
         Ok(KotlinCodeOracle.ffi_struct_name(nm.as_ref()))
+    }
+
+    /// Wasm32 byte offset of `field` inside `ffi_struct`. Used by the
+    /// wasm-js NamespaceLibraryTemplate to emit `WasmMemoryView.{get,set}X`
+    /// calls at the right offset for each FfiStruct field. See the
+    /// `wasm_layout` module for the layout rules.
+    pub fn wasm_field_offset(
+        field: &FfiField,
+        ffi_struct: &FfiStruct,
+    ) -> Result<usize, askama::Error> {
+        wasm_layout::offset_of(field, ffi_struct).ok_or_else(|| {
+            to_askama_error(&format!(
+                "wasm_field_offset: field '{}' not found in struct '{}'",
+                field.name(),
+                ffi_struct.name(),
+            ))
+        })
+    }
+
+    /// Render a Kotlin getter expression for `field` of `ffi_struct`,
+    /// rooted at the wasm-js `ptr` receiver. The returned string is a
+    /// single Kotlin expression: callers wrap it in
+    /// `get() = <expression>`. Multi-line for composite types.
+    pub fn wasm_field_getter(
+        field: &FfiField,
+        ffi_struct: &FfiStruct,
+    ) -> Result<String, askama::Error> {
+        let offset = wasm_field_offset(field, ffi_struct)?;
+        Ok(wasm_layout::render_field_getter(
+            &field.type_(),
+            "ptr",
+            offset,
+        ))
+    }
+
+    /// Render a Kotlin setter body for `field` of `ffi_struct`. The
+    /// returned string is a sequence of Kotlin statements that write
+    /// the local `value` to memory at `ptr + offset`.
+    pub fn wasm_field_setter(
+        field: &FfiField,
+        ffi_struct: &FfiStruct,
+    ) -> Result<String, askama::Error> {
+        let offset = wasm_field_offset(field, ffi_struct)?;
+        Ok(wasm_layout::render_field_setter(
+            &field.type_(),
+            "ptr",
+            offset,
+        ))
     }
 
     pub fn async_poll(
