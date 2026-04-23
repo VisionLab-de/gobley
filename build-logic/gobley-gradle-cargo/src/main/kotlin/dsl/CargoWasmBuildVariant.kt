@@ -47,5 +47,7 @@ abstract class CargoWasmBuildVariant @Inject constructor(
             }
         )
         dependsOn(buildTaskProvider)
+        val wasmTransformerEnabled = extension.wasmTransformerEnabled
+        onlyIf("wasmTransformerEnabled") { wasmTransformerEnabled.get() }
     }
 }

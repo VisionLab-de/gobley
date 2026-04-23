@@ -260,11 +260,13 @@ class CargoPlugin : Plugin<Project> {
                 it is KotlinJvmTarget || it is KotlinWithJavaTarget<*, *>
             }
         }
+        val wasmTransformerEnabled = cargoExtension.wasmTransformerEnabled
         val wasmBindgenInstallTask =
             tasks.register<InstallWasmTransformerTask>("installWasmTransformer") {
                 group = TASK_GROUP
                 binaryCrateSource.set(cargoExtension.wasmTransformerSource)
                 installDirectory.set(layout.buildDirectory.dir("gobley-tools-install/wasm-transformer"))
+                onlyIf("wasmTransformerEnabled") { wasmTransformerEnabled.get() }
             }
         for (cargoBuild in cargoExtension.builds) {
             val rustUpTargetAddTask =

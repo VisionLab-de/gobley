@@ -166,6 +166,24 @@ abstract class CargoExtension(final override val project: Project) : HasProject,
             )
 
     /**
+     * When `false`, the WASM transformer pipeline (`installWasmTransformer` +
+     * `transformWasm*` tasks) is skipped.
+     *
+     * Use when consuming bindgen-only Kotlin/Wasm output: the uniffi bindgen
+     * emits self-contained Kotlin/Wasm (`external fun` + `@JsFun` + `js("...")`)
+     * that the Kotlin/Wasm compiler links directly against the raw .wasm
+     * binary. The transformer's `.mjs` helper + secondary `.kt` wrapper are
+     * redundant in that mode — keeping them enabled wastes build time and
+     * produces dead files.
+     *
+     * Default: `false` — bindgen-only path is the common case. Consumers
+     * importing the transformer `.mjs` helper via `@JsModule` must opt in
+     * with `wasmTransformerEnabled = true`.
+     */
+    val wasmTransformerEnabled: Property<Boolean> =
+        project.objects.property<Boolean>().convention(false)
+
+    /**
      * Install the WASM transformer located in the given [path].
      */
     fun wasmTransformerFromPath(path: Directory) {
