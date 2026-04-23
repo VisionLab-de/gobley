@@ -176,8 +176,77 @@ internal object {{ trait_impl }} {
     }
     {% endfor %}
 
+    {%- for (ffi_callback, meth) in vtable_methods.iter() %}
+    internal val {{ meth.name()|var_name_raw }}Callback: {{ ffi_callback.name()|ffi_callback_name }} = {
+        {%- for arg in ffi_callback.arguments() %}
+        {{ arg.name()|var_name }},
+        {%- endfor %}
+        {%- if ffi_callback.has_rust_call_status_arg() %}
+        uniffiCallStatus,
+        {%- endif %}
+        -> {{ trait_impl }}.{{ meth.name()|var_name }}(
+            {%- for arg in ffi_callback.arguments() %}
+            {{ arg.name()|var_name }},
+            {%- endfor %}
+            {%- if ffi_callback.has_rust_call_status_arg() %}
+            uniffiCallStatus,
+            {%- endif %}
+        )
+    }
+
+    internal fun callbackFor{{ meth.name()|class_name(ci) }}Index(index: Int): {{ ffi_callback.name()|ffi_callback_name }}? {
+        return when (index) {
+            0 -> null
+            {{ vtable_indices_obj }}.{{ meth.name()|var_name }} -> {{ meth.name()|var_name_raw }}Callback
+            else -> throw InternalException(
+                "Unexpected callback index for {{ name }}.{{ meth.name() }}: $index",
+            )
+        }
+    }
+
+    internal fun indexFor{{ meth.name()|class_name(ci) }}Callback(callback: {{ ffi_callback.name()|ffi_callback_name }}?): Int {
+        return when {
+            callback == null -> 0
+            !{{ vtable_indices_obj }}.loaded -> throw InternalException(
+                "Vtable indices for {{ name }} not loaded before storing {{ meth.name() }} callback",
+            )
+            callback === {{ meth.name()|var_name_raw }}Callback -> {{ vtable_indices_obj }}.{{ meth.name()|var_name }}
+            else -> throw InternalException(
+                "Unsupported callback instance for {{ name }}.{{ meth.name() }}: $callback",
+            )
+        }
+    }
+    {%- endfor %}
+
     internal fun uniffiFree(handle: Long) {
         {{ ffi_converter_name }}.handleMap.remove(handle)
+    }
+
+    internal val uniffiFreeCallback: UniffiCallbackInterfaceFree = { handle ->
+        {{ trait_impl }}.uniffiFree(handle)
+    }
+
+    internal fun callbackForUniffiFreeIndex(index: Int): UniffiCallbackInterfaceFree? {
+        return when (index) {
+            0 -> null
+            {{ vtable_indices_obj }}.uniffiFree -> uniffiFreeCallback
+            else -> throw InternalException(
+                "Unexpected callback index for {{ name }}.uniffiFree: $index",
+            )
+        }
+    }
+
+    internal fun indexForUniffiFreeCallback(callback: UniffiCallbackInterfaceFree?): Int {
+        return when {
+            callback == null -> 0
+            !{{ vtable_indices_obj }}.loaded -> throw InternalException(
+                "Vtable indices for {{ name }} not loaded before storing uniffiFree callback",
+            )
+            callback === uniffiFreeCallback -> {{ vtable_indices_obj }}.uniffiFree
+            else -> throw InternalException(
+                "Unsupported callback instance for {{ name }}.uniffiFree: $callback",
+            )
+        }
     }
 
     // Cache vtable indices once and allocate the Rust-side vtable struct.

@@ -1,5 +1,118 @@
 {% include "ffi/Helpers.kt" %}
 
+// Rust-stack scratch-space helpers.
+//
+// `gobley-wasm-transformer` exports `__gobley_add_to_stack_pointer(delta)`
+// from the Rust module so Kotlin/Wasm can carve out temporary slots inside
+// Rust linear memory for ABI patterns like status out-pointers and sret
+// return buffers.
+@JsFun("(delta) => globalThis.__gobleyRustExports.__gobley_add_to_stack_pointer(delta)")
+internal external fun __gobley_wasm_add_to_stack_pointer(delta: Int): Int
+
+internal inline fun <T> withWasmStackFrame(size: Int, block: (Pointer) -> T): T {
+    val framePtr = __gobley_wasm_add_to_stack_pointer(-size)
+    try {
+        return block(framePtr)
+    } finally {
+        __gobley_wasm_add_to_stack_pointer(size)
+    }
+}
+
+internal fun zeroWasmMemory(ptr: Pointer, size: Int) {
+    for (i in 0 until size) {
+        WasmMemoryView.setByte(ptr + i, 0)
+    }
+}
+
+internal fun readRustBufferByValue(ptr: Pointer): RustBufferByValue {
+    return RustBufferByValue(
+        capacity = WasmMemoryView.getLong(ptr + RustBuffer.OFFSET_CAPACITY),
+        len = WasmMemoryView.getLong(ptr + RustBuffer.OFFSET_LEN),
+        data = WasmMemoryView.getInt(ptr + RustBuffer.OFFSET_DATA).let { if (it == 0) null else it },
+    )
+}
+
+internal fun readForeignBytesByValue(ptr: Pointer): ForeignBytesByValue {
+    return ForeignBytesByValue(
+        len = WasmMemoryView.getInt(ptr),
+        data = WasmMemoryView.getInt(ptr + WASM_POINTER_SIZE_BYTES).let { if (it == 0) null else it },
+    )
+}
+
+internal fun readUniffiRustCallStatusByValue(ptr: Pointer): UniffiRustCallStatusByValue {
+    return UniffiRustCallStatusByValue(
+        code = WasmMemoryView.getByte(ptr + UNIFFI_RUST_CALL_STATUS_OFFSET_CODE),
+        errorBuf = readRustBufferByValue(ptr + UNIFFI_RUST_CALL_STATUS_OFFSET_ERROR_BUF),
+    )
+}
+
+
+// Resolve the function-table index for the exported
+// `gobley_async_continuation_callback` shim that the Rust future-poll ABI
+// expects.
+@JsFun("() => { const table = globalThis.__gobleyIndirectFunctionTable; const callback = globalThis.__gobleyKotlinExports?.gobley_async_continuation_callback ?? globalThis.gobley_async_continuation_callback; if (table == null || callback == null) { throw new Error('gobley wasmJs async callback index unavailable before initialization'); } for (let i = 0; i < table.length; i++) { if (table.get(i) === callback) return i; } throw new Error('gobley wasmJs async continuation callback not found in __indirect_function_table'); }")
+internal external fun __gobley_async_continuation_callback_index(): Int
+
+internal val UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK_INDEX: Int by lazy {
+    __gobley_async_continuation_callback_index()
+}
+
+internal fun uniffiRustFutureContinuationCallbackIndex(
+    callback: UniffiRustFutureContinuationCallback,
+): Int {
+    val ignoredCallback = callback
+    return UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK_INDEX
+}
+
+private val uniffiOpaqueCallbackIndices: MutableMap<Any, Int> = mutableMapOf()
+
+internal fun <T> uniffiRememberOpaqueCallback(callback: T, index: Int): T {
+    if (callback != null) {
+        uniffiOpaqueCallbackIndices[callback as Any] = index
+    }
+    return callback
+}
+
+internal fun uniffiOpaqueCallbackIndex(callback: Any?): Int? {
+    return callback?.let { uniffiOpaqueCallbackIndices[it] }
+}
+
+{%- if ci.has_async_callback_interface_definition() %}
+// Resolve the function-table index for the exported
+// `gobley_foreign_future_free` shim that Rust stores in
+// `UniffiForeignFuture.free`.
+@JsFun("() => { const table = globalThis.__gobleyIndirectFunctionTable; const callback = globalThis.__gobleyKotlinExports?.gobley_foreign_future_free ?? globalThis.gobley_foreign_future_free; if (table == null || callback == null) { throw new Error('gobley wasmJs foreign-future free index unavailable before initialization'); } for (let i = 0; i < table.length; i++) { if (table.get(i) === callback) return i; } throw new Error('gobley wasmJs foreign-future free callback not found in __indirect_function_table'); }")
+internal external fun __gobley_foreign_future_free_index(): Int
+
+internal val UNIFFI_FOREIGN_FUTURE_FREE_INDEX: Int by lazy {
+    __gobley_foreign_future_free_index()
+}
+
+internal fun uniffiForeignFutureFreeCallbackForIndex(
+    index: Int,
+): UniffiForeignFutureFree? {
+    return when (index) {
+        0 -> null
+        UNIFFI_FOREIGN_FUTURE_FREE_INDEX -> uniffiForeignFutureFreeImpl
+        else -> throw InternalException(
+            "Unexpected foreign future free callback index: $index",
+        )
+    }
+}
+
+internal fun uniffiIndexForForeignFutureFreeCallback(
+    callback: UniffiForeignFutureFree?,
+): Int {
+    return when {
+        callback == null -> 0
+        callback === uniffiForeignFutureFreeImpl -> UNIFFI_FOREIGN_FUTURE_FREE_INDEX
+        else -> throw InternalException(
+            "Unsupported foreign future free callback instance: $callback",
+        )
+    }
+}
+{%- endif %}
+
 // UniffiRustCallStatus for Kotlin/Wasm.
 //
 // Layout in Rust (uniffi_core 0.29.5 `ffi/rustcalls.rs:42-53`):
@@ -65,36 +178,13 @@ internal object UniffiRustCallStatusHelper {
     // read `status.code` and `status.errorBuf` *after* the rust call writes
     // to that pointer. So we must hand `block` a real pointer to memory
     // the rust side can write to, not a Kotlin-side struct.
-    //
-    // RUNTIME CAVEAT (T0.C.3.b.1):
-    //   This currently piggy-backs on `RustBufferHelper.allocValue` to
-    //   obtain a 32-byte Rust-linear-memory slab. That helper itself goes
-    //   through `uniffiRustCall { … withReference { … } }`, so the *first*
-    //   call from foreign code to Rust will infinite-recurse.
-    //
-    //   Fix is scoped to T0.C.3.b.4 (a dedicated `uniffi_<ns>_alloc(size)`
-    //   export — or a JS-side bump arena — that doesn't itself need a
-    //   status struct). The signature here is what the rest of the wasm-js
-    //   binding needs to compile against; the runtime path is wired up by
-    //   .b.2 (`UniffiLib.<fn>` bodies) and .b.4 (scratch allocator).
-    //
-    // We initialize the slab to all-zero (`code = 0 = UNIFFI_CALL_SUCCESS`,
-    // `error_buf` zero) before handing it to `block` — `RustBufferHelper.allocValue`
-    // returns capacity-N zero-filled memory, which already covers this.
+    // The wasm transformer exports `__gobley_add_to_stack_pointer`, so we
+    // can reserve a temporary 32-byte slot on Rust's own stack instead of
+    // recursing through `RustBufferHelper.allocValue`.
     internal inline fun <U> withReference(block: (UniffiRustCallStatus) -> U): U {
-        val slab = RustBufferHelper.allocValue(UNIFFI_RUST_CALL_STATUS_SIZE_BYTES.toULong())
-        val slabPtr = slab.data
-            ?: throw RuntimeException("UniffiRustCallStatusHelper: alloc returned null data pointer")
-        // Zero the struct: `RustBufferHelper.allocValue` allocates a Vec<u8>
-        // capacity-N but len=0, so the bytes are uninitialized from Rust's
-        // perspective. Zero the first 32 bytes explicitly.
-        for (i in 0 until UNIFFI_RUST_CALL_STATUS_SIZE_BYTES) {
-            WasmMemoryView.setByte(slabPtr + i, 0)
-        }
-        try {
-            return block(UniffiRustCallStatus(slabPtr))
-        } finally {
-            RustBufferHelper.free(slab)
+        return withWasmStackFrame(UNIFFI_RUST_CALL_STATUS_SIZE_BYTES) { slabPtr ->
+            zeroWasmMemory(slabPtr, UNIFFI_RUST_CALL_STATUS_SIZE_BYTES)
+            block(UniffiRustCallStatus(slabPtr))
         }
     }
 }

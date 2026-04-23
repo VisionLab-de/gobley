@@ -194,6 +194,7 @@ export async function init(rustWasm, opts) {
 
     gobleyInstallMemoryView(exports.memory);
     globalThis.__gobleyRustExports = exports;
+    globalThis.__gobleyKotlinExports = kotlinFns;
 
     // Optional: surface `__indirect_function_table` if the Rust crate was
     // built with `-C link-arg=--export-table` (T0.C.1 spike, "Required

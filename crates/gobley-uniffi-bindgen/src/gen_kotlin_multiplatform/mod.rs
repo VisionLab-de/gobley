@@ -548,7 +548,11 @@ kotlin_type_renderer!(StubTypeRenderer, "stub/Types.kt");
 kotlin_wrapper!(StubKotlinWrapper, StubTypeRenderer, "stub/wrapper.kt");
 
 kotlin_type_renderer!(WasmJsTypeRenderer, "wasm-js/Types.kt");
-kotlin_wrapper!(WasmJsKotlinWrapper, WasmJsTypeRenderer, "wasm-js/wrapper.kt");
+kotlin_wrapper!(
+    WasmJsKotlinWrapper,
+    WasmJsTypeRenderer,
+    "wasm-js/wrapper.kt"
+);
 
 kotlin_type_renderer!(HeadersTypeRenderer, "headers/Types.h");
 kotlin_wrapper!(
@@ -940,7 +944,6 @@ pub enum DataClassFieldType {
     NullableNonBytes,
 }
 
-
 /// Wasm32 C ABI memory layout helpers for FFI struct codegen (Kotlin/Wasm target).
 ///
 /// Mirror Rust's `#[repr(C)]` layout rules on wasm32:
@@ -1188,6 +1191,481 @@ mod wasm_layout {
         }
     }
 }
+mod wasm_calls {
+    use askama::Error;
+    use uniffi_bindgen::backend::filters::to_askama_error;
+    use uniffi_bindgen::interface::{
+        ComponentInterface, FfiDefinition, FfiFunction, FfiStruct, FfiType,
+    };
+
+    use super::{wasm_callback_fields, wasm_layout, KotlinCodeOracle};
+
+    pub(super) fn render_import_decl(
+        func: &FfiFunction,
+        _ci: &ComponentInterface,
+    ) -> Result<String, Error> {
+        let params = raw_params(func)?;
+        let js_params = params
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let raw_return = raw_return_type(func.return_type())?;
+
+        if params.is_empty() {
+            return Ok(format!(
+                "@JsFun(\"() => globalThis.__gobleyRustExports.{name}()\")\n\
+                 internal external fun __gobley_call_{name}(): {raw_return}",
+                name = func.name(),
+            ));
+        }
+
+        let kotlin_params = params
+            .iter()
+            .map(|(name, ty)| format!("    {name}: {ty},"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(format!(
+            "@JsFun(\"({js_params}) => globalThis.__gobleyRustExports.{name}({js_params})\")\n\
+             internal external fun __gobley_call_{name}(\n\
+             {kotlin_params}\n\
+             ): {raw_return}",
+            name = func.name(),
+        ))
+    }
+
+    pub(super) fn render_function_body(
+        func: &FfiFunction,
+        ci: &ComponentInterface,
+    ) -> Result<String, Error> {
+        let mut raw_call_args = Vec::new();
+        if let Some(return_type) = func.return_type() {
+            if needs_sret(return_type) {
+                raw_call_args.push("uniffiOutReturnPtr".to_string());
+            }
+        }
+        for arg in func.arguments() {
+            raw_call_args.extend(lower_arg(arg.name(), &arg.type_(), ci)?);
+        }
+        if func.has_rust_call_status_arg() {
+            raw_call_args.push("uniffiCallStatus.ptr".to_string());
+        }
+
+        let raw_call = format!(
+            "__gobley_call_{}({})",
+            func.name(),
+            raw_call_args.join(", ")
+        );
+
+        match func.return_type() {
+            None => Ok(raw_call),
+            Some(return_type) if needs_sret(return_type) => {
+                let frame_size = wasm_layout::size_of(return_type);
+                let lifted = lift_sret_return(return_type, "uniffiOutReturnPtr", ci)?;
+                Ok(format!(
+                    "return withWasmStackFrame({frame_size}) {{ uniffiOutReturnPtr ->\n\
+                     \x20           {raw_call}\n\
+                     \x20           {lifted}\n\
+                     \x20       }}"
+                ))
+            }
+            Some(return_type) => Ok(format!(
+                "return {}",
+                lift_direct_return(return_type, &raw_call)?
+            )),
+        }
+    }
+
+    fn raw_params(func: &FfiFunction) -> Result<Vec<(String, String)>, Error> {
+        let mut params = Vec::new();
+        if let Some(return_type) = func.return_type() {
+            if needs_sret(return_type) {
+                params.push(("uniffiOutReturnPtr".to_string(), "Int".to_string()));
+            }
+        }
+        for (idx, arg) in func.arguments().into_iter().enumerate() {
+            params.extend(raw_type_params(&arg.type_(), &format!("arg{idx}"))?);
+        }
+        if func.has_rust_call_status_arg() {
+            params.push(("uniffiCallStatusPtr".to_string(), "Int".to_string()));
+        }
+        Ok(params)
+    }
+
+    fn raw_type_params(type_: &FfiType, base: &str) -> Result<Vec<(String, String)>, Error> {
+        Ok(match type_ {
+            FfiType::Int8 | FfiType::UInt8 => vec![(base.to_string(), "Byte".to_string())],
+            FfiType::Int16 | FfiType::UInt16 => vec![(base.to_string(), "Short".to_string())],
+            FfiType::Int32 | FfiType::UInt32 => vec![(base.to_string(), "Int".to_string())],
+            FfiType::Int64 | FfiType::UInt64 | FfiType::Handle => {
+                vec![(base.to_string(), "Long".to_string())]
+            }
+            FfiType::Float32 => vec![(base.to_string(), "Float".to_string())],
+            FfiType::Float64 => vec![(base.to_string(), "Double".to_string())],
+            FfiType::RustArcPtr(_)
+            | FfiType::Callback(_)
+            | FfiType::Struct(_)
+            | FfiType::Reference(_)
+            | FfiType::MutReference(_)
+            | FfiType::VoidPointer => vec![(base.to_string(), "Int".to_string())],
+            FfiType::RustBuffer(_) => vec![
+                (format!("{base}Capacity"), "Long".to_string()),
+                (format!("{base}Len"), "Long".to_string()),
+                (format!("{base}Data"), "Int".to_string()),
+            ],
+            FfiType::ForeignBytes => vec![
+                (format!("{base}Len"), "Int".to_string()),
+                (format!("{base}Data"), "Int".to_string()),
+            ],
+            FfiType::RustCallStatus => {
+                return Err(to_askama_error(
+                    "RustCallStatus only travels as an explicit out-status arg",
+                ));
+            }
+        })
+    }
+
+    fn raw_return_type(return_type: Option<&FfiType>) -> Result<String, Error> {
+        let Some(return_type) = return_type else {
+            return Ok("Unit".to_string());
+        };
+        if needs_sret(return_type) {
+            return Ok("Unit".to_string());
+        }
+        Ok(match return_type {
+            FfiType::Int8 | FfiType::UInt8 => "Byte",
+            FfiType::Int16 | FfiType::UInt16 => "Short",
+            FfiType::Int32 | FfiType::UInt32 => "Int",
+            FfiType::Int64 | FfiType::UInt64 | FfiType::Handle => "Long",
+            FfiType::Float32 => "Float",
+            FfiType::Float64 => "Double",
+            FfiType::RustArcPtr(_)
+            | FfiType::Callback(_)
+            | FfiType::Struct(_)
+            | FfiType::Reference(_)
+            | FfiType::MutReference(_)
+            | FfiType::VoidPointer => "Int",
+            FfiType::RustBuffer(_) | FfiType::ForeignBytes | FfiType::RustCallStatus => "Unit",
+        }
+        .to_string())
+    }
+
+    fn lower_arg(
+        name: &str,
+        type_: &FfiType,
+        ci: &ComponentInterface,
+    ) -> Result<Vec<String>, Error> {
+        let kotlin_name = KotlinCodeOracle.var_name(name);
+        Ok(match type_ {
+            FfiType::Int8
+            | FfiType::UInt8
+            | FfiType::Int16
+            | FfiType::UInt16
+            | FfiType::Int32
+            | FfiType::UInt32
+            | FfiType::Int64
+            | FfiType::UInt64
+            | FfiType::Float32
+            | FfiType::Float64
+            | FfiType::Handle
+            | FfiType::VoidPointer => vec![kotlin_name],
+            FfiType::RustArcPtr(_) => vec![format!("{kotlin_name} ?: 0")],
+            FfiType::Callback(callback_name) => match callback_name.as_str() {
+                "RustFutureContinuationCallback" | "UniffiRustFutureContinuationCallback" => {
+                    vec![format!(
+                        "uniffiRustFutureContinuationCallbackIndex({kotlin_name})"
+                    )]
+                }
+                _ => {
+                    return Err(to_askama_error(&format!(
+                        "unsupported callback arg lowering for wasmJs export {callback_name}"
+                    )));
+                }
+            },
+            FfiType::Struct(_) | FfiType::Reference(_) | FfiType::MutReference(_) => {
+                vec![format!("{kotlin_name}.ptr")]
+            }
+            FfiType::RustBuffer(_) => {
+                let local = local_rust_buffer_expr(&kotlin_name, type_, ci);
+                vec![
+                    format!("{local}.capacity"),
+                    format!("{local}.len"),
+                    format!("{local}.data ?: 0"),
+                ]
+            }
+            FfiType::ForeignBytes => vec![
+                format!("{kotlin_name}.len"),
+                format!("{kotlin_name}.data ?: 0"),
+            ],
+            FfiType::RustCallStatus => {
+                return Err(to_askama_error(
+                    "RustCallStatus only travels as an explicit out-status arg",
+                ));
+            }
+        })
+    }
+
+    fn lift_direct_return(return_type: &FfiType, raw_call: &str) -> Result<String, Error> {
+        Ok(match return_type {
+            FfiType::Int8
+            | FfiType::UInt8
+            | FfiType::Int16
+            | FfiType::UInt16
+            | FfiType::Int32
+            | FfiType::UInt32
+            | FfiType::Int64
+            | FfiType::UInt64
+            | FfiType::Float32
+            | FfiType::Float64
+            | FfiType::Handle
+            | FfiType::VoidPointer => raw_call.to_string(),
+            FfiType::RustArcPtr(_) => format!("{raw_call}.let {{ if (it == 0) null else it }}"),
+            FfiType::Struct(name) => {
+                format!(
+                    "{raw_call}.let {{ {}(it) }}",
+                    KotlinCodeOracle.ffi_struct_name(name)
+                )
+            }
+            FfiType::Reference(inner) | FfiType::MutReference(inner) => {
+                format!("{raw_call}.let {{ {} }}", wrap_pointer_return(inner, "it")?)
+            }
+            FfiType::Callback(name) => {
+                return Err(to_askama_error(&format!(
+                    "unsupported direct callback return for wasmJs export {name}"
+                )));
+            }
+            FfiType::RustBuffer(_) | FfiType::ForeignBytes | FfiType::RustCallStatus => {
+                return Err(to_askama_error(
+                    "by-value wasm returns must use the sret path",
+                ));
+            }
+        })
+    }
+
+    fn lift_sret_return(
+        return_type: &FfiType,
+        ptr_expr: &str,
+        ci: &ComponentInterface,
+    ) -> Result<String, Error> {
+        match return_type {
+            FfiType::RustBuffer(Some(metadata)) if metadata.module_path != ci.crate_name() => Ok(
+                format!("readRustBufferByValue({ptr_expr}).as{}()", metadata.name),
+            ),
+            FfiType::RustBuffer(_) => Ok(format!("readRustBufferByValue({ptr_expr})")),
+            FfiType::ForeignBytes => Ok(format!("readForeignBytesByValue({ptr_expr})")),
+            FfiType::RustCallStatus => Ok(format!("readUniffiRustCallStatusByValue({ptr_expr})")),
+            FfiType::Struct(name) => {
+                let ffi_struct = lookup_ffi_struct(ci, name)?;
+                render_struct_by_value(ffi_struct, ptr_expr, ci)
+            }
+            _ => Err(to_askama_error(
+                "non-sret wasm return requested through sret lift",
+            )),
+        }
+    }
+
+    fn wrap_pointer_return(inner: &FfiType, expr: &str) -> Result<String, Error> {
+        Ok(match inner {
+            FfiType::Int8 | FfiType::UInt8 => format!("ByteByReference({expr})"),
+            FfiType::Int16 | FfiType::UInt16 => format!("ShortByReference({expr})"),
+            FfiType::Int32 | FfiType::UInt32 => format!("IntByReference({expr})"),
+            FfiType::Int64 | FfiType::UInt64 | FfiType::Handle => {
+                format!("LongByReference({expr})")
+            }
+            FfiType::Float32 => format!("FloatByReference({expr})"),
+            FfiType::Float64 => format!("DoubleByReference({expr})"),
+            FfiType::RustArcPtr(_) => format!("PointerByReference({expr})"),
+            FfiType::RustBuffer(_) => format!("RustBuffer({expr})"),
+            FfiType::Struct(name) => format!("{}({expr})", KotlinCodeOracle.ffi_struct_name(name)),
+            FfiType::VoidPointer => expr.to_string(),
+            FfiType::Callback(name) => {
+                return Err(to_askama_error(&format!(
+                    "unsupported callback pointer return for wasmJs export {name}"
+                )));
+            }
+            FfiType::Reference(_)
+            | FfiType::MutReference(_)
+            | FfiType::ForeignBytes
+            | FfiType::RustCallStatus => {
+                return Err(to_askama_error(
+                    "unsupported nested pointer return type for wasmJs export",
+                ));
+            }
+        })
+    }
+
+    fn local_rust_buffer_expr(arg_expr: &str, type_: &FfiType, ci: &ComponentInterface) -> String {
+        match type_ {
+            FfiType::RustBuffer(Some(metadata)) if metadata.module_path != ci.crate_name() => {
+                format!("{arg_expr}.from{}ToLocal()", metadata.name)
+            }
+            _ => arg_expr.to_string(),
+        }
+    }
+
+    fn lookup_ffi_struct(ci: &ComponentInterface, name: &str) -> Result<FfiStruct, Error> {
+        for def in ci.ffi_definitions() {
+            let FfiDefinition::Struct(ffi_struct) = def else {
+                continue;
+            };
+            if ffi_struct.name() == name {
+                return Ok(ffi_struct.clone());
+            }
+        }
+        Err(to_askama_error(&format!(
+            "could not find wasm FFI struct definition '{name}'"
+        )))
+    }
+
+    fn render_struct_by_value(
+        ffi_struct: FfiStruct,
+        ptr_expr: &str,
+        ci: &ComponentInterface,
+    ) -> Result<String, Error> {
+        let constructor_name = format!(
+            "{}UniffiByValue",
+            KotlinCodeOracle.ffi_struct_name(ffi_struct.name())
+        );
+        let mut fields = Vec::new();
+        for field in ffi_struct.fields() {
+            let offset = wasm_layout::offset_of(field, &ffi_struct).ok_or_else(|| {
+                to_askama_error(&format!(
+                    "could not compute wasm field offset for {}.{}",
+                    ffi_struct.name(),
+                    field.name()
+                ))
+            })?;
+            let getter = match field.type_() {
+                FfiType::Callback(_) => {
+                    wasm_callback_fields::render_getter(field, &ffi_struct, ptr_expr, offset, ci)?
+                }
+                _ => wasm_layout::render_field_getter(&field.type_(), ptr_expr, offset),
+            };
+            fields.push(format!(
+                "{} = {}",
+                KotlinCodeOracle.var_name(field.name()),
+                getter
+            ));
+        }
+
+        if fields.is_empty() {
+            return Ok(format!("{constructor_name}()"));
+        }
+
+        Ok(format!(
+            "{constructor_name}(\n\
+             \x20           {}\n\
+             \x20       )",
+            fields.join(",\n            ")
+        ))
+    }
+
+    fn needs_sret(return_type: &FfiType) -> bool {
+        matches!(
+            return_type,
+            FfiType::RustBuffer(_)
+                | FfiType::ForeignBytes
+                | FfiType::RustCallStatus
+                | FfiType::Struct(_)
+        )
+    }
+}
+mod wasm_callback_fields {
+    use askama::Error;
+    use uniffi_bindgen::backend::filters::to_askama_error;
+    use uniffi_bindgen::interface::{
+        ComponentInterface, FfiCallbackFunction, FfiDefinition, FfiField, FfiStruct, FfiType,
+    };
+
+    use super::KotlinCodeOracle;
+
+    pub(super) fn render_getter(
+        field: &FfiField,
+        ffi_struct: &FfiStruct,
+        base: &str,
+        offset: usize,
+        ci: &ComponentInterface,
+    ) -> Result<String, Error> {
+        let callback_name = match field.type_() {
+            FfiType::Callback(name) => name,
+            _ => {
+                return Err(to_askama_error(&format!(
+                    "render_getter called for non-callback field {}.{}",
+                    ffi_struct.name(),
+                    field.name()
+                )));
+            }
+        };
+        let callback = lookup_callback(ci, &callback_name)?;
+        let lambda = render_opaque_callback_lambda(&callback, ffi_struct.name(), field.name(), ci);
+        Ok(format!(
+            "run {{ val callbackIndex = WasmMemoryView.getInt({base} + {offset}); if (callbackIndex == 0) null else uniffiRememberOpaqueCallback({lambda}, callbackIndex) }}"
+        ))
+    }
+
+    pub(super) fn render_setter(
+        field: &FfiField,
+        ffi_struct: &FfiStruct,
+        base: &str,
+        offset: usize,
+    ) -> Result<String, Error> {
+        Ok(format!(
+            r#"WasmMemoryView.setInt({base} + {offset}, if (value == null) 0 else uniffiOpaqueCallbackIndex(value) ?: throw InternalException("Unsupported callback instance for {}.{}: $value"))"#,
+            ffi_struct.name(),
+            field.name(),
+        ))
+    }
+
+    fn lookup_callback(
+        ci: &ComponentInterface,
+        callback_name: &str,
+    ) -> Result<FfiCallbackFunction, Error> {
+        for def in ci.ffi_definitions() {
+            let FfiDefinition::CallbackFunction(callback) = def else {
+                continue;
+            };
+            if callback.name() == callback_name {
+                return Ok(callback.clone());
+            }
+        }
+        Err(to_askama_error(&format!(
+            "could not find wasm callback definition '{callback_name}'"
+        )))
+    }
+
+    fn render_opaque_callback_lambda(
+        callback: &FfiCallbackFunction,
+        struct_name: &str,
+        field_name: &str,
+        ci: &ComponentInterface,
+    ) -> String {
+        let mut params = callback
+            .arguments()
+            .into_iter()
+            .map(|arg| {
+                format!(
+                    "{}: {}",
+                    KotlinCodeOracle.var_name(arg.name()),
+                    KotlinCodeOracle.ffi_type_label_by_value(&arg.type_(), ci)
+                )
+            })
+            .collect::<Vec<_>>();
+        if callback.has_rust_call_status_arg() {
+            params.push("uniffiCallStatus: UniffiRustCallStatus".to_string());
+        }
+        let body = format!(
+            r#"throw InternalException("Opaque callback field {}.{} cannot be invoked from Kotlin")"#,
+            struct_name, field_name
+        );
+        if params.is_empty() {
+            format!("{{ {body} }}")
+        } else {
+            format!("{{ {} -> {body} }}", params.join(", "))
+        }
+    }
+}
+
 mod filters {
     pub use uniffi_bindgen::backend::filters::*;
     use uniffi_bindgen::{backend::filters::to_askama_error, interface::ffi::ExternalFfiMetadata};
@@ -1601,13 +2079,19 @@ mod filters {
     pub fn wasm_field_getter(
         field: &FfiField,
         ffi_struct: &FfiStruct,
+        ci: &ComponentInterface,
     ) -> Result<String, askama::Error> {
         let offset = wasm_field_offset(field, ffi_struct)?;
-        Ok(wasm_layout::render_field_getter(
-            &field.type_(),
-            "ptr",
-            offset,
-        ))
+        match field.type_() {
+            FfiType::Callback(_) => {
+                wasm_callback_fields::render_getter(field, ffi_struct, "ptr", offset, ci)
+            }
+            _ => Ok(wasm_layout::render_field_getter(
+                &field.type_(),
+                "ptr",
+                offset,
+            )),
+        }
     }
 
     /// Render a Kotlin setter body for `field` of `ffi_struct`. The
@@ -1618,11 +2102,30 @@ mod filters {
         ffi_struct: &FfiStruct,
     ) -> Result<String, askama::Error> {
         let offset = wasm_field_offset(field, ffi_struct)?;
-        Ok(wasm_layout::render_field_setter(
-            &field.type_(),
-            "ptr",
-            offset,
-        ))
+        match field.type_() {
+            FfiType::Callback(_) => {
+                wasm_callback_fields::render_setter(field, ffi_struct, "ptr", offset)
+            }
+            _ => Ok(wasm_layout::render_field_setter(
+                &field.type_(),
+                "ptr",
+                offset,
+            )),
+        }
+    }
+
+    pub fn wasm_js_import_decl(
+        func: &FfiFunction,
+        ci: &ComponentInterface,
+    ) -> Result<String, askama::Error> {
+        wasm_calls::render_import_decl(func, ci)
+    }
+
+    pub fn wasm_js_function_body(
+        func: &FfiFunction,
+        ci: &ComponentInterface,
+    ) -> Result<String, askama::Error> {
+        wasm_calls::render_function_body(func, ci)
     }
 
     pub fn async_poll(

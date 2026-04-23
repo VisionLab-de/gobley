@@ -52,7 +52,6 @@ internal val uniffiRustFutureContinuationCallbackCallback: UniffiRustFutureConti
     { data: Long, pollResult: Byte ->
         uniffiContinuationHandleMap.remove(data).resume(pollResult)
     }
-
 // `@JsExport` continuation callback.
 //
 // This is the function Rust's `__indirect_function_table` actually

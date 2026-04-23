@@ -41,7 +41,7 @@ internal value class {{ ffi_struct.name()|ffi_struct_name }}(internal val ptr: P
 
 {%- for field in ffi_struct.fields() %}
 internal var {{ ffi_struct.name()|ffi_struct_name }}.{{ field.name()|var_name }}: {{ field.type_().borrow()|ffi_type_name_for_ffi_struct(ci) }}
-    get() = {{ field|wasm_field_getter(ffi_struct) }}
+    get() = {{ field|wasm_field_getter(ffi_struct, ci) }}
     set(value) {
         {{ field|wasm_field_setter(ffi_struct) }}
     }
@@ -90,6 +90,11 @@ internal data class {{ ffi_struct.name()|ffi_struct_name }}UniffiByValue(
 // flatten to multiple i32 args. `Long` corresponds to wasm i64 and
 // rides JS BigInt (Kotlin/Wasm 2.1+ handles the conversion).
 
+{%- for func in ci.iter_ffi_function_definitions() %}
+{{ func|wasm_js_import_decl(ci) }}
+
+{%- endfor %}
+
 internal object UniffiLib {
     init {
         {%- for init_fn in self.initialization_fns(ci) %}
@@ -114,11 +119,7 @@ internal object UniffiLib {
     {%- when None -%}
     Unit
     {%- endmatch %} {
-        // TODO(T0.C.3): dispatch to `wasmExports.{{ func.name() }}(...)`
-        // via the JS glue object (`@JsFun` import) once the loader is
-        // wired. For now the call site exists so the rest of the
-        // generated Kotlin compiles structurally.
-        TODO("UniffiLib.{{ func.name() }} bound to wasm exports in T0.C.3")
+        {{ func|wasm_js_function_body(ci) }}
     }
     {% endfor %}
 }
