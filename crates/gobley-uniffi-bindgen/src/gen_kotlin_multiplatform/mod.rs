@@ -963,7 +963,13 @@ pub enum DataClassFieldType {
 /// in `target/wasm32-unknown-unknown/debug/gobley_fixture_coverall.wasm`
 /// (T0.C.3.b.1 verification).
 mod wasm_layout {
-    use uniffi_bindgen::interface::{FfiField, FfiStruct, FfiType};
+    use askama::Error;
+    use uniffi_bindgen::backend::filters::to_askama_error;
+    use uniffi_bindgen::interface::{
+        ComponentInterface, FfiCallbackFunction, FfiDefinition, FfiField, FfiStruct, FfiType,
+    };
+
+    use super::KotlinCodeOracle;
 
     /// Size in bytes occupied by `ty` in a `#[repr(C)]` struct on wasm32.
     pub(super) fn size_of(ty: &FfiType) -> usize {
@@ -1052,17 +1058,30 @@ mod wasm_layout {
         (offset + align - 1) & !(align - 1)
     }
 
-    /// Render a Kotlin getter expression that reads a field of `ty` from
-    /// memory at `base + offset`, returning the wasm-js Kotlin type for `ty`.
+    /// Render a Kotlin getter expression that reads `field` from memory at
+    /// `base + offset`, returning the wasm-js Kotlin type for the field.
     ///
     /// The returned expression is a single Kotlin expression suitable for
     /// emission inside the generated property `get()` body. For composite
     /// types (RustBuffer, RustCallStatus) the expression is a constructor
-    /// call wrapping multiple field reads.
-    pub(super) fn render_field_getter(ty: &FfiType, base: &str, offset: usize) -> String {
-        match ty {
+    /// call wrapping multiple field reads. The `Callback` arm emits the
+    /// opaque-identity lookup that rehydrates an i32 callback-table index
+    /// back into the Kotlin lambda previously written through
+    /// `render_field_setter` (see the matching arm below).
+    ///
+    /// `ffi_struct` + `ci` are only consumed by the `Callback` arm (for
+    /// error messages + callback-signature lookup). The other arms use
+    /// only `base` + `offset`.
+    pub(super) fn render_field_getter(
+        field: &FfiField,
+        ffi_struct: &FfiStruct,
+        base: &str,
+        offset: usize,
+        ci: &ComponentInterface,
+    ) -> Result<String, Error> {
+        match field.type_() {
             FfiType::Int8 | FfiType::UInt8 => {
-                format!("WasmMemoryView.getByte({base} + {offset})")
+                Ok(format!("WasmMemoryView.getByte({base} + {offset})"))
             }
             // No native getShort/setShort on WasmMemoryView yet; emulate with
             // two big-endian byte reads (matches the pattern used by
@@ -1070,51 +1089,59 @@ mod wasm_layout {
             // two-byte sequence will need to flip to little-endian once the
             // WasmMemoryView shim is fixed for wasm-native byte order
             // (T0.C.6.x: full LE audit).
-            FfiType::Int16 | FfiType::UInt16 => format!(
+            FfiType::Int16 | FfiType::UInt16 => Ok(format!(
                 "(((WasmMemoryView.getByte({base} + {offset}).toInt() and 0xff) shl 8) or \
                  (WasmMemoryView.getByte({base} + {offset} + 1).toInt() and 0xff)).toShort()"
-            ),
+            )),
             FfiType::Int32 | FfiType::UInt32 => {
-                format!("WasmMemoryView.getInt({base} + {offset})")
+                Ok(format!("WasmMemoryView.getInt({base} + {offset})"))
             }
             FfiType::Int64 | FfiType::UInt64 | FfiType::Handle => {
-                format!("WasmMemoryView.getLong({base} + {offset})")
+                Ok(format!("WasmMemoryView.getLong({base} + {offset})"))
             }
-            FfiType::Float32 => format!("WasmMemoryView.getFloat({base} + {offset})"),
-            FfiType::Float64 => format!("WasmMemoryView.getDouble({base} + {offset})"),
+            FfiType::Float32 => Ok(format!("WasmMemoryView.getFloat({base} + {offset})")),
+            FfiType::Float64 => Ok(format!("WasmMemoryView.getDouble({base} + {offset})")),
             // Pointer-shaped types: i32 read, with `0` lifted to `null` for
             // nullable `Pointer?` Kotlin types.
-            FfiType::RustArcPtr(_) => format!(
+            FfiType::RustArcPtr(_) => Ok(format!(
                 "WasmMemoryView.getInt({base} + {offset}).let {{ if (it == 0) null else it }}"
-            ),
-            // Callback fields are typed as the Kotlin function typealias
-            // (e.g. `UniffiForeignFutureFree?` = `((Long) -> Unit)?`). Wasm
-            // memory carries an i32 (the rust-side `__indirect_function_table`
-            // index per the T0.C.1 spike), but Kotlin/Wasm cannot materialize
-            // a function value from an i32 — the round-trip must go through
-            // the Kotlin-side HandleMap that T0.C.4 wires up. For now stub
-            // both halves with a runtime TODO; the property type is what the
-            // generated `UniffiByValue` data class declares, so dropping it
-            // would shift the type mismatch elsewhere.
-            FfiType::Callback(_) => {
-                let _ = (base, offset);
-                "TODO(\"Callback FFI struct field accessor wired by T0.C.4 callback dispatch\")".to_string()
+            )),
+            // Callback field round-trip: wasm memory carries the i32
+            // `__indirect_function_table` index (per the T0.C.1 spike), but
+            // Kotlin/Wasm cannot materialize a function value from an i32
+            // directly. `uniffiRememberOpaqueCallback` looks the index back
+            // up in the Kotlin-side `uniffiOpaqueCallbackIndices` map that
+            // the matching setter populated. If the index is unknown, the
+            // lambda surfaces an `InternalException` when invoked — opaque
+            // callbacks are identity-only pass-through values, never
+            // callable from the Kotlin side.
+            FfiType::Callback(callback_name) => {
+                let callback = lookup_callback(ci, &callback_name)?;
+                let lambda = render_opaque_callback_lambda(
+                    &callback,
+                    ffi_struct.name(),
+                    field.name(),
+                    ci,
+                );
+                Ok(format!(
+                    "run {{ val callbackIndex = WasmMemoryView.getInt({base} + {offset}); if (callbackIndex == 0) null else uniffiRememberOpaqueCallback({lambda}, callbackIndex) }}"
+                ))
             }
             FfiType::Reference(_) | FfiType::MutReference(_) | FfiType::VoidPointer => {
-                format!("WasmMemoryView.getInt({base} + {offset})")
+                Ok(format!("WasmMemoryView.getInt({base} + {offset})"))
             }
             // RustBuffer field: read three sub-fields at known offsets,
             // construct RustBufferByValue. Mirror the inline expansion in
             // wasm-js/Helpers.kt:errorBuf getter.
-            FfiType::RustBuffer(_) => format!(
+            FfiType::RustBuffer(_) => Ok(format!(
                 "RustBufferByValue(\n\
                  \x20           capacity = WasmMemoryView.getLong(({base} + {offset}) + RustBuffer.OFFSET_CAPACITY),\n\
                  \x20           len = WasmMemoryView.getLong(({base} + {offset}) + RustBuffer.OFFSET_LEN),\n\
                  \x20           data = WasmMemoryView.getInt(({base} + {offset}) + RustBuffer.OFFSET_DATA).let {{ if (it == 0) null else it }},\n\
                  \x20       )"
-            ),
+            )),
             // RustCallStatus field: i8 code at field-base+0, RustBuffer at field-base+8.
-            FfiType::RustCallStatus => format!(
+            FfiType::RustCallStatus => Ok(format!(
                 "UniffiRustCallStatusByValue(\n\
                  \x20           code = WasmMemoryView.getByte(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_CODE),\n\
                  \x20           errorBuf = RustBufferByValue(\n\
@@ -1123,71 +1150,143 @@ mod wasm_layout {
                  \x20               data = WasmMemoryView.getInt(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_ERROR_BUF + RustBuffer.OFFSET_DATA).let {{ if (it == 0) null else it }},\n\
                  \x20           ),\n\
                  \x20       )"
-            ),
-            FfiType::ForeignBytes => format!(
+            )),
+            FfiType::ForeignBytes => Ok(format!(
                 "ForeignBytesByValue(\n\
                  \x20           len = WasmMemoryView.getInt({base} + {offset}),\n\
                  \x20           data = WasmMemoryView.getInt(({base} + {offset}) + 4).let {{ if (it == 0) null else it }},\n\
                  \x20       )"
-            ),
+            )),
             FfiType::Struct(name) => {
                 unimplemented!("nested by-value FfiStruct field getter ({name})")
             }
         }
     }
 
-    /// Render a Kotlin setter body that writes `value` (a Kotlin local of the
-    /// wasm-js Kotlin type for `ty`) to memory at `base + offset`. The
-    /// returned string is a sequence of statements suitable for emission
-    /// inside the generated property `set(value)` body.
-    pub(super) fn render_field_setter(ty: &FfiType, base: &str, offset: usize) -> String {
-        match ty {
+    /// Render a Kotlin setter body that writes `value` (a Kotlin local of
+    /// the wasm-js Kotlin type for `field`) to memory at `base + offset`.
+    /// The returned string is a sequence of statements suitable for
+    /// emission inside the generated property `set(value)` body. The
+    /// `Callback` arm emits an identity-write that looks the lambda up in
+    /// `uniffiOpaqueCallbackIndices` (populated when the lambda was
+    /// originally received from Rust — see the matching getter).
+    ///
+    /// `ffi_struct` is only consumed by the `Callback` arm for the
+    /// thrown `InternalException` message. The other arms use only
+    /// `base` + `offset`. `ci` is not threaded through here because the
+    /// setter does not need the callback-function signature.
+    pub(super) fn render_field_setter(
+        field: &FfiField,
+        ffi_struct: &FfiStruct,
+        base: &str,
+        offset: usize,
+    ) -> Result<String, Error> {
+        match field.type_() {
             FfiType::Int8 | FfiType::UInt8 => {
-                format!("WasmMemoryView.setByte({base} + {offset}, value)")
+                Ok(format!("WasmMemoryView.setByte({base} + {offset}, value)"))
             }
-            FfiType::Int16 | FfiType::UInt16 => format!(
+            FfiType::Int16 | FfiType::UInt16 => Ok(format!(
                 "WasmMemoryView.setByte({base} + {offset}, ((value.toInt() ushr 8) and 0xff).toByte())\n\
                  \x20       WasmMemoryView.setByte({base} + {offset} + 1, (value.toInt() and 0xff).toByte())"
-            ),
+            )),
             FfiType::Int32 | FfiType::UInt32 => {
-                format!("WasmMemoryView.setInt({base} + {offset}, value)")
+                Ok(format!("WasmMemoryView.setInt({base} + {offset}, value)"))
             }
             FfiType::Int64 | FfiType::UInt64 | FfiType::Handle => {
-                format!("WasmMemoryView.setLong({base} + {offset}, value)")
+                Ok(format!("WasmMemoryView.setLong({base} + {offset}, value)"))
             }
-            FfiType::Float32 => format!("WasmMemoryView.setFloat({base} + {offset}, value)"),
-            FfiType::Float64 => format!("WasmMemoryView.setDouble({base} + {offset}, value)"),
+            FfiType::Float32 => Ok(format!("WasmMemoryView.setFloat({base} + {offset}, value)")),
+            FfiType::Float64 => Ok(format!("WasmMemoryView.setDouble({base} + {offset}, value)")),
             FfiType::RustArcPtr(_) => {
-                format!("WasmMemoryView.setInt({base} + {offset}, value ?: 0)")
+                Ok(format!("WasmMemoryView.setInt({base} + {offset}, value ?: 0)"))
             }
             // See the matching `Callback(_)` arm in `render_field_getter`:
-            // wasm memory holds an i32 vtable index, not a function value.
-            // T0.C.4 will route writes through the Kotlin HandleMap.
-            FfiType::Callback(_) => {
-                let _ = (base, offset);
-                "TODO(\"Callback FFI struct field accessor wired by T0.C.4 callback dispatch\")".to_string()
-            }
+            // wasm memory holds an i32 `__indirect_function_table` index,
+            // not a function value. Opaque-identity writes look the
+            // Kotlin lambda back up in `uniffiOpaqueCallbackIndices` —
+            // any lambda the caller did not originally receive from Rust
+            // has no known index and trips `InternalException`.
+            FfiType::Callback(_) => Ok(format!(
+                r#"WasmMemoryView.setInt({base} + {offset}, if (value == null) 0 else uniffiOpaqueCallbackIndex(value) ?: throw InternalException("Unsupported callback instance for {}.{}: $value"))"#,
+                ffi_struct.name(),
+                field.name(),
+            )),
             FfiType::Reference(_) | FfiType::MutReference(_) | FfiType::VoidPointer => {
-                format!("WasmMemoryView.setInt({base} + {offset}, value)")
+                Ok(format!("WasmMemoryView.setInt({base} + {offset}, value)"))
             }
-            FfiType::RustBuffer(_) => format!(
+            FfiType::RustBuffer(_) => Ok(format!(
                 "WasmMemoryView.setLong(({base} + {offset}) + RustBuffer.OFFSET_CAPACITY, value.capacity)\n\
                  \x20       WasmMemoryView.setLong(({base} + {offset}) + RustBuffer.OFFSET_LEN, value.len)\n\
                  \x20       WasmMemoryView.setInt(({base} + {offset}) + RustBuffer.OFFSET_DATA, value.data ?: 0)"
-            ),
-            FfiType::RustCallStatus => format!(
+            )),
+            FfiType::RustCallStatus => Ok(format!(
                 "WasmMemoryView.setByte(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_CODE, value.code)\n\
                  \x20       WasmMemoryView.setLong(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_ERROR_BUF + RustBuffer.OFFSET_CAPACITY, value.errorBuf.capacity)\n\
                  \x20       WasmMemoryView.setLong(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_ERROR_BUF + RustBuffer.OFFSET_LEN, value.errorBuf.len)\n\
                  \x20       WasmMemoryView.setInt(({base} + {offset}) + UNIFFI_RUST_CALL_STATUS_OFFSET_ERROR_BUF + RustBuffer.OFFSET_DATA, value.errorBuf.data ?: 0)"
-            ),
-            FfiType::ForeignBytes => format!(
+            )),
+            FfiType::ForeignBytes => Ok(format!(
                 "WasmMemoryView.setInt({base} + {offset}, value.len)\n\
                  \x20       WasmMemoryView.setInt(({base} + {offset}) + 4, value.data ?: 0)"
-            ),
+            )),
             FfiType::Struct(name) => {
                 unimplemented!("nested by-value FfiStruct field setter ({name})")
             }
+        }
+    }
+
+    /// Look up a callback-function definition by name in the component
+    /// interface. Only the `Callback` field arm needs this, hence a
+    /// private helper inside `wasm_layout`.
+    fn lookup_callback(
+        ci: &ComponentInterface,
+        callback_name: &str,
+    ) -> Result<FfiCallbackFunction, Error> {
+        for def in ci.ffi_definitions() {
+            let FfiDefinition::CallbackFunction(callback) = def else {
+                continue;
+            };
+            if callback.name() == callback_name {
+                return Ok(callback.clone());
+            }
+        }
+        Err(to_askama_error(&format!(
+            "could not find wasm callback definition '{callback_name}'"
+        )))
+    }
+
+    /// Render the Kotlin lambda passed to `uniffiRememberOpaqueCallback`
+    /// when a callback-field getter rehydrates an unknown callback index.
+    /// The lambda body always throws — opaque callback fields are
+    /// identity pass-through values, never Kotlin-invocable.
+    fn render_opaque_callback_lambda(
+        callback: &FfiCallbackFunction,
+        struct_name: &str,
+        field_name: &str,
+        ci: &ComponentInterface,
+    ) -> String {
+        let mut params = callback
+            .arguments()
+            .into_iter()
+            .map(|arg| {
+                format!(
+                    "{}: {}",
+                    KotlinCodeOracle.var_name(arg.name()),
+                    KotlinCodeOracle.ffi_type_label_by_value(&arg.type_(), ci)
+                )
+            })
+            .collect::<Vec<_>>();
+        if callback.has_rust_call_status_arg() {
+            params.push("uniffiCallStatus: UniffiRustCallStatus".to_string());
+        }
+        let body = format!(
+            r#"throw InternalException("Opaque callback field {}.{} cannot be invoked from Kotlin")"#,
+            struct_name, field_name
+        );
+        if params.is_empty() {
+            format!("{{ {body} }}")
+        } else {
+            format!("{{ {} -> {body} }}", params.join(", "))
         }
     }
 }
@@ -1198,7 +1297,7 @@ mod wasm_calls {
         ComponentInterface, FfiDefinition, FfiFunction, FfiStruct, FfiType,
     };
 
-    use super::{wasm_callback_fields, wasm_layout, KotlinCodeOracle};
+    use super::{wasm_layout, KotlinCodeOracle};
 
     pub(super) fn render_import_decl(
         func: &FfiFunction,
@@ -1536,12 +1635,8 @@ mod wasm_calls {
                     field.name()
                 ))
             })?;
-            let getter = match field.type_() {
-                FfiType::Callback(_) => {
-                    wasm_callback_fields::render_getter(field, &ffi_struct, ptr_expr, offset, ci)?
-                }
-                _ => wasm_layout::render_field_getter(&field.type_(), ptr_expr, offset),
-            };
+            let getter =
+                wasm_layout::render_field_getter(field, &ffi_struct, ptr_expr, offset, ci)?;
             fields.push(format!(
                 "{} = {}",
                 KotlinCodeOracle.var_name(field.name()),
@@ -1571,101 +1666,6 @@ mod wasm_calls {
         )
     }
 }
-mod wasm_callback_fields {
-    use askama::Error;
-    use uniffi_bindgen::backend::filters::to_askama_error;
-    use uniffi_bindgen::interface::{
-        ComponentInterface, FfiCallbackFunction, FfiDefinition, FfiField, FfiStruct, FfiType,
-    };
-
-    use super::KotlinCodeOracle;
-
-    pub(super) fn render_getter(
-        field: &FfiField,
-        ffi_struct: &FfiStruct,
-        base: &str,
-        offset: usize,
-        ci: &ComponentInterface,
-    ) -> Result<String, Error> {
-        let callback_name = match field.type_() {
-            FfiType::Callback(name) => name,
-            _ => {
-                return Err(to_askama_error(&format!(
-                    "render_getter called for non-callback field {}.{}",
-                    ffi_struct.name(),
-                    field.name()
-                )));
-            }
-        };
-        let callback = lookup_callback(ci, &callback_name)?;
-        let lambda = render_opaque_callback_lambda(&callback, ffi_struct.name(), field.name(), ci);
-        Ok(format!(
-            "run {{ val callbackIndex = WasmMemoryView.getInt({base} + {offset}); if (callbackIndex == 0) null else uniffiRememberOpaqueCallback({lambda}, callbackIndex) }}"
-        ))
-    }
-
-    pub(super) fn render_setter(
-        field: &FfiField,
-        ffi_struct: &FfiStruct,
-        base: &str,
-        offset: usize,
-    ) -> Result<String, Error> {
-        Ok(format!(
-            r#"WasmMemoryView.setInt({base} + {offset}, if (value == null) 0 else uniffiOpaqueCallbackIndex(value) ?: throw InternalException("Unsupported callback instance for {}.{}: $value"))"#,
-            ffi_struct.name(),
-            field.name(),
-        ))
-    }
-
-    fn lookup_callback(
-        ci: &ComponentInterface,
-        callback_name: &str,
-    ) -> Result<FfiCallbackFunction, Error> {
-        for def in ci.ffi_definitions() {
-            let FfiDefinition::CallbackFunction(callback) = def else {
-                continue;
-            };
-            if callback.name() == callback_name {
-                return Ok(callback.clone());
-            }
-        }
-        Err(to_askama_error(&format!(
-            "could not find wasm callback definition '{callback_name}'"
-        )))
-    }
-
-    fn render_opaque_callback_lambda(
-        callback: &FfiCallbackFunction,
-        struct_name: &str,
-        field_name: &str,
-        ci: &ComponentInterface,
-    ) -> String {
-        let mut params = callback
-            .arguments()
-            .into_iter()
-            .map(|arg| {
-                format!(
-                    "{}: {}",
-                    KotlinCodeOracle.var_name(arg.name()),
-                    KotlinCodeOracle.ffi_type_label_by_value(&arg.type_(), ci)
-                )
-            })
-            .collect::<Vec<_>>();
-        if callback.has_rust_call_status_arg() {
-            params.push("uniffiCallStatus: UniffiRustCallStatus".to_string());
-        }
-        let body = format!(
-            r#"throw InternalException("Opaque callback field {}.{} cannot be invoked from Kotlin")"#,
-            struct_name, field_name
-        );
-        if params.is_empty() {
-            format!("{{ {body} }}")
-        } else {
-            format!("{{ {} -> {body} }}", params.join(", "))
-        }
-    }
-}
-
 mod filters {
     pub use uniffi_bindgen::backend::filters::*;
     use uniffi_bindgen::{backend::filters::to_askama_error, interface::ffi::ExternalFfiMetadata};
@@ -2082,16 +2082,7 @@ mod filters {
         ci: &ComponentInterface,
     ) -> Result<String, askama::Error> {
         let offset = wasm_field_offset(field, ffi_struct)?;
-        match field.type_() {
-            FfiType::Callback(_) => {
-                wasm_callback_fields::render_getter(field, ffi_struct, "ptr", offset, ci)
-            }
-            _ => Ok(wasm_layout::render_field_getter(
-                &field.type_(),
-                "ptr",
-                offset,
-            )),
-        }
+        wasm_layout::render_field_getter(field, ffi_struct, "ptr", offset, ci)
     }
 
     /// Render a Kotlin setter body for `field` of `ffi_struct`. The
@@ -2102,16 +2093,7 @@ mod filters {
         ffi_struct: &FfiStruct,
     ) -> Result<String, askama::Error> {
         let offset = wasm_field_offset(field, ffi_struct)?;
-        match field.type_() {
-            FfiType::Callback(_) => {
-                wasm_callback_fields::render_setter(field, ffi_struct, "ptr", offset)
-            }
-            _ => Ok(wasm_layout::render_field_setter(
-                &field.type_(),
-                "ptr",
-                offset,
-            )),
-        }
+        wasm_layout::render_field_setter(field, ffi_struct, "ptr", offset)
     }
 
     pub fn wasm_js_import_decl(
