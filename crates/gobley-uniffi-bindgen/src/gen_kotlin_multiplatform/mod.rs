@@ -1470,6 +1470,18 @@ mod wasm_calls {
             | FfiType::Handle
             | FfiType::VoidPointer => vec![kotlin_name],
             FfiType::RustArcPtr(_) => vec![format!("{kotlin_name} ?: 0")],
+            // Callback args (vs. callback fields inside FFI structs) only exist in
+            // uniffi's codegen for async-future continuation plumbing today. The
+            // UniffiRustFutureContinuationCallback has a canonical Kotlin impl
+            // exported at a fixed __indirect_function_table slot — resolved via
+            // uniffiRustFutureContinuationCallbackIndex(...) and lowered as i32.
+            //
+            // Any other callback name reaching this arm means either (a) a new
+            // upstream uniffi feature needs its own per-name resolver, or (b) an
+            // attempt to pass a Kotlin-side callback as an FFI arg — the
+            // opaque-identity model only handles struct-field callbacks (via the
+            // wasm_layout Callback arm), not args. Fail at codegen with a named
+            // error so surface area stays visible.
             FfiType::Callback(callback_name) => match callback_name.as_str() {
                 "RustFutureContinuationCallback" | "UniffiRustFutureContinuationCallback" => {
                     vec![format!(
