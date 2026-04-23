@@ -64,6 +64,27 @@ internal fun uniffiRustFutureContinuationCallbackIndex(
     return UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK_INDEX
 }
 
+// Identity map for FFI-struct-field callbacks (opaque dispatch model).
+//
+// Rust stores an i32 __indirect_function_table index in every FFI-struct
+// callback field (e.g. UniffiForeignFuture.free). The i32 index is what
+// travels Rust → Kotlin → Rust unchanged. Kotlin never invokes the
+// callback; it only needs to return the same index Rust wrote when a
+// getter-then-setter roundtrips via uniffiSetValue. To do that, the
+// getter binds a throwing sentinel lambda to the index in this map, and
+// the setter recovers the index from that lambda's identity.
+//
+// Bound: one entry per callback-field getter call site emitted in the
+// generated bindings for the namespace (roughly FFI-struct × callback-field).
+// Sentinel lambdas are non-capturing — Kotlin/Wasm lowers them to
+// per-call-site singletons, so repeated getter invocations reuse the
+// same key and do not grow the map. No eviction — acceptable because
+// the call-site set is frozen at uniffi codegen time and lifetime equals
+// the wasm module's lifetime.
+//
+// Single-threaded JS event loop (wasm-js target) — no synchronization
+// required. Revisit if this template is ever reused for a threaded
+// target (e.g. SharedArrayBuffer worker pool).
 private val uniffiOpaqueCallbackIndices: MutableMap<Any, Int> = mutableMapOf()
 
 internal fun <T> uniffiRememberOpaqueCallback(callback: T, index: Int): T {
