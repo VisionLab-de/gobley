@@ -966,10 +966,10 @@ mod wasm_layout {
     use askama::Error;
     use uniffi_bindgen::backend::filters::to_askama_error;
     use uniffi_bindgen::interface::{
-        ComponentInterface, FfiCallbackFunction, FfiDefinition, FfiField, FfiStruct, FfiType,
+        ComponentInterface, FfiCallbackFunction, FfiField, FfiStruct, FfiType,
     };
 
-    use super::KotlinCodeOracle;
+    use super::{filters::ffi_as_callback, KotlinCodeOracle};
 
     /// Size in bytes occupied by `ty` in a `#[repr(C)]` struct on wasm32.
     pub(super) fn size_of(ty: &FfiType) -> usize {
@@ -1116,13 +1116,12 @@ mod wasm_layout {
             // callbacks are identity-only pass-through values, never
             // callable from the Kotlin side.
             FfiType::Callback(callback_name) => {
-                let callback = lookup_callback(ci, &callback_name)?;
-                let lambda = render_opaque_callback_lambda(
-                    &callback,
-                    ffi_struct.name(),
-                    field.name(),
-                    ci,
-                );
+                let callback = ffi_as_callback(&field.type_(), ci)?.ok_or_else(|| {
+                    to_askama_error(&format!(
+                        "could not find wasm callback definition '{callback_name}'"
+                    ))
+                })?;
+                let lambda = render_opaque_callback_lambda(&callback, ffi_struct, field, ci);
                 Ok(format!(
                     "run {{ val callbackIndex = WasmMemoryView.getInt({base} + {offset}); if (callbackIndex == 0) null else uniffiRememberOpaqueCallback({lambda}, callbackIndex) }}"
                 ))
@@ -1235,34 +1234,14 @@ mod wasm_layout {
         }
     }
 
-    /// Look up a callback-function definition by name in the component
-    /// interface. Only the `Callback` field arm needs this, hence a
-    /// private helper inside `wasm_layout`.
-    fn lookup_callback(
-        ci: &ComponentInterface,
-        callback_name: &str,
-    ) -> Result<FfiCallbackFunction, Error> {
-        for def in ci.ffi_definitions() {
-            let FfiDefinition::CallbackFunction(callback) = def else {
-                continue;
-            };
-            if callback.name() == callback_name {
-                return Ok(callback.clone());
-            }
-        }
-        Err(to_askama_error(&format!(
-            "could not find wasm callback definition '{callback_name}'"
-        )))
-    }
-
     /// Render the Kotlin lambda passed to `uniffiRememberOpaqueCallback`
     /// when a callback-field getter rehydrates an unknown callback index.
     /// The lambda body always throws — opaque callback fields are
     /// identity pass-through values, never Kotlin-invocable.
     fn render_opaque_callback_lambda(
         callback: &FfiCallbackFunction,
-        struct_name: &str,
-        field_name: &str,
+        ffi_struct: &FfiStruct,
+        field: &FfiField,
         ci: &ComponentInterface,
     ) -> String {
         let mut params = callback
@@ -1281,7 +1260,8 @@ mod wasm_layout {
         }
         let body = format!(
             r#"throw InternalException("Opaque callback field {}.{} cannot be invoked from Kotlin")"#,
-            struct_name, field_name
+            ffi_struct.name(),
+            field.name()
         );
         if params.is_empty() {
             format!("{{ {body} }}")
