@@ -22,7 +22,6 @@ import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.TaskProvider
 import org.gradle.jvm.tasks.Jar
 import org.gradle.kotlin.dsl.support.uppercaseFirstChar
-import org.gradle.util.GradleVersion
 import java.io.File
 import java.util.Locale
 
@@ -275,13 +274,6 @@ object DependencyUtils {
         }
     }
 
-    @Suppress("DEPRECATION")
     private val ProjectDependency.versionCompatiblePath: String
-        get() {
-            val currentBaseVersion = GradleVersion.current().baseVersion
-            return when {
-                currentBaseVersion >= GradleVersion.version("8.11") -> path
-                else -> dependencyProject.path
-            }
-        }
+        get() = path
 }

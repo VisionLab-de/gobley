@@ -45,6 +45,7 @@ kotlin {
 android {
     namespace = "dev.gobley.uniffi.tests.uniffi.coverall"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
+    ndkVersion = libs.versions.android.ndk.get()
 
     defaultConfig {
         minSdk = 29

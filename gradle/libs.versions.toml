@@ -1,7 +1,7 @@
 [versions]
 
-kotlin = "2.1.10"
-agp = "8.7.3"
+kotlin = "2.3.20"
+agp = "9.0.0"
 
 buildconfig = "5.5.1"
 vanniktech-maven-publish = "0.31.0"
@@ -14,6 +14,7 @@ kotlinx-binary-compatibility-validator = "0.18.1"
 
 android-compileSdk = "35"
 android-targetSdk = "35"
+android-ndk = "28.0.13004108"
 
 androidx-activity-compose = "1.10.0"
 androidx-annotation = "1.8.2"

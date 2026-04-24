@@ -87,6 +87,7 @@ kotlin {
 android {
     namespace = "dev.gobley.uniffi.examples.tokioboringapp"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
+    ndkVersion = libs.versions.android.ndk.get()
 
     defaultConfig {
         applicationId = "dev.gobley.uniffi.examples.tokioboringapp"
