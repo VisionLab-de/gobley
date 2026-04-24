@@ -93,6 +93,7 @@ kotlin {
 android {
     namespace = "dev.gobley.uniffi.tests.gradle.androidlinking"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
+    ndkVersion = libs.versions.android.ndk.get()
 
     defaultConfig {
         minSdk = 29

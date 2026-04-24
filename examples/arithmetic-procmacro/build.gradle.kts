@@ -85,6 +85,7 @@ kotlin {
 android {
     namespace = "dev.gobley.uniffi.examples.arithmeticpm"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
+    ndkVersion = libs.versions.android.ndk.get()
 
     defaultConfig {
         consumerProguardFiles("proguard-rules.pro")
