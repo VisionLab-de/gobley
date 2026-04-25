@@ -75,28 +75,28 @@
 
     {{ visibility() }}fun getInt(): Int {
         checkRemaining(4)
-        val value = WasmMemoryView.getInt(pointer + position)
+        val value = WasmMemoryView.getIntBE(pointer + position)
         position += 4
         return value
     }
 
     {{ visibility() }}fun getLong(): Long {
         checkRemaining(8)
-        val value = WasmMemoryView.getLong(pointer + position)
+        val value = WasmMemoryView.getLongBE(pointer + position)
         position += 8
         return value
     }
 
     {{ visibility() }}fun getFloat(): Float {
         checkRemaining(4)
-        val value = WasmMemoryView.getFloat(pointer + position)
+        val value = WasmMemoryView.getFloatBE(pointer + position)
         position += 4
         return value
     }
 
     {{ visibility() }}fun getDouble(): Double {
         checkRemaining(8)
-        val value = WasmMemoryView.getDouble(pointer + position)
+        val value = WasmMemoryView.getDoubleBE(pointer + position)
         position += 8
         return value
     }
@@ -124,25 +124,25 @@
 
     {{ visibility() }}fun putInt(value: Int) {
         checkRemaining(4)
-        WasmMemoryView.setInt(pointer + position, value)
+        WasmMemoryView.setIntBE(pointer + position, value)
         position += 4
     }
 
     {{ visibility() }}fun putLong(value: Long) {
         checkRemaining(8)
-        WasmMemoryView.setLong(pointer + position, value)
+        WasmMemoryView.setLongBE(pointer + position, value)
         position += 8
     }
 
     {{ visibility() }}fun putFloat(value: Float) {
         checkRemaining(4)
-        WasmMemoryView.setFloat(pointer + position, value)
+        WasmMemoryView.setFloatBE(pointer + position, value)
         position += 4
     }
 
     {{ visibility() }}fun putDouble(value: Double) {
         checkRemaining(8)
-        WasmMemoryView.setDouble(pointer + position, value)
+        WasmMemoryView.setDoubleBE(pointer + position, value)
         position += 8
     }
 }

@@ -93,6 +93,34 @@ internal external fun __gobley_wasm_get_double(addr: Int): Double
 @JsFun("(addr, value) => globalThis.__gobleyWasmMemory.setFloat64(addr, value, true)")
 internal external fun __gobley_wasm_set_double(addr: Int, value: Double)
 
+// Big-endian variants for UniFFI wire-format serialization (ByteBuffer).
+// Rust's `bytes` crate reads/writes integers as BE inside RustBuffer payloads.
+// The LE variants above are for C ABI struct field access (RustBuffer layout).
+
+@JsFun("(addr) => globalThis.__gobleyWasmMemory.getInt32(addr, false)")
+internal external fun __gobley_wasm_get_int_be(addr: Int): Int
+
+@JsFun("(addr, value) => globalThis.__gobleyWasmMemory.setInt32(addr, value, false)")
+internal external fun __gobley_wasm_set_int_be(addr: Int, value: Int)
+
+@JsFun("(addr) => globalThis.__gobleyWasmMemory.getBigInt64(addr, false)")
+internal external fun __gobley_wasm_get_long_be(addr: Int): Long
+
+@JsFun("(addr, low, high) => { const value = (BigInt(high >>> 0) << 32n) | BigInt(low >>> 0); globalThis.__gobleyWasmMemory.setBigInt64(addr, value, false); }")
+internal external fun __gobley_wasm_set_long_be_parts(addr: Int, low: Int, high: Int)
+
+@JsFun("(addr) => globalThis.__gobleyWasmMemory.getFloat32(addr, false)")
+internal external fun __gobley_wasm_get_float_be(addr: Int): Float
+
+@JsFun("(addr, value) => globalThis.__gobleyWasmMemory.setFloat32(addr, value, false)")
+internal external fun __gobley_wasm_set_float_be(addr: Int, value: Float)
+
+@JsFun("(addr) => globalThis.__gobleyWasmMemory.getFloat64(addr, false)")
+internal external fun __gobley_wasm_get_double_be(addr: Int): Double
+
+@JsFun("(addr, value) => globalThis.__gobleyWasmMemory.setFloat64(addr, value, false)")
+internal external fun __gobley_wasm_set_double_be(addr: Int, value: Double)
+
 // Bulk byte transfer between Kotlin `ByteArray` and Rust linear memory.
 // This is the *Kotlin → Rust* direction of the 2-copy boundary
 // (T0.B Decision 1): Kotlin reads its `ByteArray` element-by-element
@@ -134,6 +162,33 @@ internal object WasmMemoryView {
     fun getDouble(addr: Pointer): Double = __gobley_wasm_get_double(addr)
 
     fun setDouble(addr: Pointer, value: Double): Unit = __gobley_wasm_set_double(addr, value)
+
+    // Big-endian accessors for UniFFI wire-format serialization (ByteBuffer).
+    fun getIntBE(addr: Pointer): Int = __gobley_wasm_get_int_be(addr)
+
+    fun setIntBE(addr: Pointer, value: Int): Unit = __gobley_wasm_set_int_be(addr, value)
+
+    fun getLongBE(addr: Pointer): Long {
+        val hi = __gobley_wasm_get_int_be(addr)
+        val lo = __gobley_wasm_get_int_be(addr + 4)
+        return (hi.toLong() shl 32) or (lo.toLong() and 0xFFFF_FFFFL)
+    }
+
+    fun setLongBE(addr: Pointer, value: Long): Unit {
+        __gobley_wasm_set_long_be_parts(
+            addr,
+            value.toInt(),
+            (value shr 32).toInt(),
+        )
+    }
+
+    fun getFloatBE(addr: Pointer): Float = __gobley_wasm_get_float_be(addr)
+
+    fun setFloatBE(addr: Pointer, value: Float): Unit = __gobley_wasm_set_float_be(addr, value)
+
+    fun getDoubleBE(addr: Pointer): Double = __gobley_wasm_get_double_be(addr)
+
+    fun setDoubleBE(addr: Pointer, value: Double): Unit = __gobley_wasm_set_double_be(addr, value)
 
     fun getBytes(addr: Pointer, dst: ByteArray) {
         // Per-byte copy. T0.C.6 may swap to a single typed-array `subarray`
