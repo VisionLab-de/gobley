@@ -35,32 +35,17 @@ internal object {{ vtable_indices_obj }} {
     internal var loaded: Boolean = false
 }
 
-// Rust-imported vtable-index lookup.
-//
-// One export on the Rust side per callback interface:
-//
-//     #[no_mangle]
-//     pub extern "C" fn uniffi_<ns>_callback_<iface>_vtable_index(method: u32) -> u32 { ... }
-//
-// where `method` is `0..methods.len()` for the trait methods and
-// `methods.len()` for `uniffi_free`. The JS shim layer (T0.C.6) wires
-// this `external` declaration to `rustExports.uniffi_<ns>_callback_<iface>_vtable_index`.
-//
-// IMPORTANT: requires the Rust crate to be built with
-// `-C link-arg=--export-table` (T0.C.1 spike, "Required linker flag").
-// Without that, `__indirect_function_table` stays internal — Rust-side
-// `call_indirect` still works, but JS cannot introspect the table to
-// verify entries.
-//
-// Scaffolding gap: as of uniffi 0.29.5 the proc-macro/UDL expander does
-// NOT emit per-interface `vtable_index` exports. The Kotlin/Wasm path
-// assumes a small custom Rust shim is generated alongside the standard
-// scaffolding (planned for a follow-up phase outside T0.C.4 — flagged
-// in the design doc).
-@JsFun(
-    "(method) => globalThis.__gobleyRustExports.uniffi_{{ ci.namespace() }}_callback_{{ name }}_vtable_index(method)"
-)
-internal external fun __gobley_vtable_index_{{ name }}(method: Int): Int
+// Resolve callback function table indices by scanning __gobleyIndirectFunctionTable
+// for the injected `gobley_callbacks` imports. The wasm transformer injects each
+// callback method as an import and places it in the indirect function table.
+// After init(), __gobleyKotlinExports has the matching Kotlin @JsExport functions.
+{%- for (_, meth) in vtable_methods.iter() %}
+@JsFun("() => { const table = globalThis.__gobleyIndirectFunctionTable; const cb = globalThis.__gobleyKotlinExports?.gobley_callback_{{ name }}_{{ meth.name()|var_name_raw }}; if (!table || !cb) throw new Error('gobley: callback {{ name }}.{{ meth.name() }} not available'); for (let i = 0; i < table.length; i++) { try { if (table.get(i) === cb) return i; } catch(e) {} } throw new Error('gobley: callback {{ name }}.{{ meth.name() }} not in table'); }")
+internal external fun __gobley_callback_index_{{ name }}_{{ meth.name()|var_name_raw }}(): Int
+{%- endfor %}
+
+@JsFun("() => { const table = globalThis.__gobleyIndirectFunctionTable; const cb = globalThis.__gobleyKotlinExports?.gobley_callback_{{ name }}_uniffi_free; if (!table || !cb) throw new Error('gobley: callback {{ name }}.uniffi_free not available'); for (let i = 0; i < table.length; i++) { try { if (table.get(i) === cb) return i; } catch(e) {} } throw new Error('gobley: callback {{ name }}.uniffi_free not in table'); }")
+internal external fun __gobley_callback_index_{{ name }}_uniffi_free(): Int
 
 internal object {{ trait_impl }} {
     {%- for (ffi_callback, meth) in vtable_methods.iter() %}
@@ -267,13 +252,11 @@ internal object {{ trait_impl }} {
     // the binary (six for rs-social-store).
     internal fun register(lib: UniffiLib) {
         if (!{{ vtable_indices_obj }}.loaded) {
-            var methodId = 0
             {%- for (_, meth) in vtable_methods.iter() %}
             {{ vtable_indices_obj }}.{{ meth.name()|var_name }} =
-                __gobley_vtable_index_{{ name }}(methodId)
-            methodId += 1
+                __gobley_callback_index_{{ name }}_{{ meth.name()|var_name_raw }}()
             {%- endfor %}
-            {{ vtable_indices_obj }}.uniffiFree = __gobley_vtable_index_{{ name }}(methodId)
+            {{ vtable_indices_obj }}.uniffiFree = __gobley_callback_index_{{ name }}_uniffi_free()
             {{ vtable_indices_obj }}.loaded = true
         }
 
@@ -337,9 +320,7 @@ public fun gobley_callback_{{ name }}_{{ meth.name()|var_name_raw }}(
     {%- for arg in ffi_callback.arguments() %}
     {%- match arg.type_().borrow() %}
     {%- when FfiType::RustBuffer(_) %}
-    {{ arg.name()|var_name_raw }}Capacity: Int,
-    {{ arg.name()|var_name_raw }}Len: Int,
-    {{ arg.name()|var_name_raw }}Data: Pointer,
+    {{ arg.name()|var_name_raw }}Ptr: Pointer,
     {%- when FfiType::Struct(_) %}
     {{ arg.name()|var_name_raw }}Ptr: Pointer,
     {%- when FfiType::MutReference(inner) %}
@@ -364,14 +345,7 @@ public fun gobley_callback_{{ name }}_{{ meth.name()|var_name_raw }}(
         {%- for arg in ffi_callback.arguments() %}
         {%- match arg.type_().borrow() %}
         {%- when FfiType::RustBuffer(_) %}
-        RustBufferByValue(
-            // u32 wire format widens to Long for byte-for-byte API
-            // compat with JVM/Native — same masking convention used by
-            // `var RustBuffer.capacity` in `RustBufferTemplate.kt`.
-            capacity = {{ arg.name()|var_name_raw }}Capacity.toLong() and 0xFFFFFFFFL,
-            len = {{ arg.name()|var_name_raw }}Len.toLong() and 0xFFFFFFFFL,
-            data = if ({{ arg.name()|var_name_raw }}Data == 0) null else {{ arg.name()|var_name_raw }}Data,
-        ),
+        readRustBufferByValue({{ arg.name()|var_name_raw }}Ptr),
         {%- when FfiType::Struct(_) %}
         {{ arg.type_().borrow()|ffi_type_name(ci) }}({{ arg.name()|var_name_raw }}Ptr),
         {%- when FfiType::MutReference(inner) %}

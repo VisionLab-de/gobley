@@ -158,10 +158,43 @@ function gobleyBuildRustImports(kotlinFns) {
  *   stored at `globalThis.__gobleyRustExports` for inline `@JsFun`
  *   bodies (see `wasm-js/CallbackInterfaceImpl.kt`).
  */
+
+{%- for (name, expr) in wasm_bindgen_factories() %}
+const {{ name }} = {{ expr }};
+{%- endfor %}
+
+function gobleyRunCjsFactory(factory) {
+    const mod = { exports: {} };
+    factory(function require() { throw new Error("gobley: require() not supported in wasmJs"); }, mod, mod.exports);
+    return mod.exports;
+}
+
+const WASM_BINDGEN_MODULES = {
+{%- for module_name in wasm_bindgen_module_names() %}
+    "{{ module_name }}": (() => {
+        const idx = {{ loop.index0 }};
+        const factories = [
+            {%- for (name, _) in wasm_bindgen_factories() %}
+            {{ name }},
+            {%- endfor %}
+        ];
+        return idx < factories.length ? gobleyRunCjsFactory(factories[idx]) : {};
+    })(),
+{%- endfor %}
+};
+
 export async function init(rustWasm, opts) {
     const options = opts || {};
     const kotlinFns = gobleyResolveKotlinExports(options.kotlinExports);
     const rustImports = gobleyBuildRustImports(kotlinFns);
+
+    // Merge wasm-bindgen module imports
+    for (const [moduleName, moduleObj] of Object.entries(WASM_BINDGEN_MODULES)) {
+        rustImports[moduleName] = Object.assign(
+            rustImports[moduleName] || {},
+            moduleObj,
+        );
+    }
 
     if (options.additionalImports) {
         for (const moduleName of Object.keys(options.additionalImports)) {
@@ -196,17 +229,42 @@ export async function init(rustWasm, opts) {
     globalThis.__gobleyRustExports = exports;
     globalThis.__gobleyKotlinExports = kotlinFns;
 
-    // Optional: surface `__indirect_function_table` if the Rust crate was
-    // built with `-C link-arg=--export-table` (T0.C.1 spike, "Required
-    // linker flag"). Used by callers that want to verify vtable indices
-    // returned from `uniffi_<ns>_callback_<iface>_vtable_index` resolve to
-    // real funcrefs. Absence is non-fatal; Rust-side `call_indirect` works
-    // either way.
-    if (exports.__indirect_function_table instanceof WebAssembly.Table) {
-        globalThis.__gobleyIndirectFunctionTable = exports.__indirect_function_table;
+    // Bind wasm instance to wasm-bindgen JS modules.
+    // The wasm-bindgen factory exports __wbg_set_wasm which lets the
+    // JS glue functions access wasm memory and exports.
+    for (const moduleObj of Object.values(WASM_BINDGEN_MODULES)) {
+        if (typeof moduleObj.__wbg_set_wasm === "function") {
+            moduleObj.__wbg_set_wasm(exports);
+        }
+        if (typeof moduleObj.__wbindgen_init_externref_table === "function") {
+            moduleObj.__wbindgen_init_externref_table();
+        }
+    }
+
+    // Surface `__indirect_function_table` for callback dispatch and
+    // runtime registration of Kotlin @JsExport functions.
+    const table = exports.__indirect_function_table;
+    if (table instanceof WebAssembly.Table) {
+        globalThis.__gobleyIndirectFunctionTable = table;
     }
 
     return instance;
+}
+
+/**
+ * Register a JS function into the Rust module's indirect function table.
+ * Returns the table index that can be passed to Rust's `call_indirect`.
+ * Used by Kotlin/Wasm to register @JsExport callbacks (e.g. async
+ * continuation callback) into the Rust function table at runtime.
+ */
+export function registerInTable(fn_) {
+    const table = globalThis.__gobleyIndirectFunctionTable;
+    if (!table) {
+        throw new Error("gobley: __indirect_function_table not available — init() not called?");
+    }
+    const idx = table.grow(1);
+    table.set(idx, fn_);
+    return idx;
 }
 
 /**

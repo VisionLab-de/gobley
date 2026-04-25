@@ -20,6 +20,10 @@ internal fun Pointer.toLong(): Long = (this as Int).toLong() and 0xFFFFFFFFL
 
 internal fun kotlin.Long.toPointer(): Pointer = this.toInt()
 
+internal fun gobleyLongLow(value: Long): Int = value.toInt()
+
+internal fun gobleyLongHigh(value: Long): Int = (value shr 32).toInt()
+
 // Reserved for future struct-field accessor codegen (T0.C.x). No active callers.
 // No overflow check: wasm32 linear memory is bounded by Int.MAX_VALUE-aligned 4 GB.
 @Suppress("NOTHING_TO_INLINE")
@@ -37,9 +41,13 @@ internal inline fun Pointer.share(offset: Int): Pointer = this + offset
 // the JS shim is hot-path JIT-friendly so the cost is negligible
 // compared to the i32-marshalling already on the wire.
 //
-// Wire format is BIG_ENDIAN to match JVM (`order(BIG_ENDIAN)`) and
-// Native (manual shifts) — required for byte-for-byte compatibility
-// with Rust's `to_be_bytes()` writes inside `RustBuffer` payloads.
+// Wire format is LITTLE_ENDIAN because raw wasm32 linear memory follows
+// the target machine endianness and Rust writes these struct fields
+// directly into memory.
+//
+// `Long` values are bridged as two signed 32-bit halves rather than a
+// JS `BigInt`. Kotlin/Wasm's `@JsFun` interop is reliable for `Int`,
+// but direct `BigInt` <-> `Long` crossings are not.
 //
 // The `external fun` declarations below import host functions from a
 // JS module named `<crate>_wasmjs_helpers.mjs`. T0.C.6 generates that
@@ -52,28 +60,37 @@ internal external fun __gobley_wasm_get_byte(addr: Int): Byte
 @JsFun("(addr, value) => globalThis.__gobleyWasmMemory.setInt8(addr, value)")
 internal external fun __gobley_wasm_set_byte(addr: Int, value: Byte)
 
-@JsFun("(addr) => globalThis.__gobleyWasmMemory.getInt32(addr, false)")
+@JsFun("(addr) => globalThis.__gobleyWasmMemory.getInt32(addr, true)")
 internal external fun __gobley_wasm_get_int(addr: Int): Int
 
-@JsFun("(addr, value) => globalThis.__gobleyWasmMemory.setInt32(addr, value, false)")
+@JsFun("(addr, value) => globalThis.__gobleyWasmMemory.setInt32(addr, value, true)")
 internal external fun __gobley_wasm_set_int(addr: Int, value: Int)
 
-@JsFun("(addr) => globalThis.__gobleyWasmMemory.getBigInt64(addr, false)")
-internal external fun __gobley_wasm_get_long(addr: Int): Long
+@JsFun("(addr) => globalThis.__gobleyWasmMemory.getInt32(addr, true)")
+internal external fun __gobley_wasm_get_long_low(addr: Int): Int
 
-@JsFun("(addr, value) => globalThis.__gobleyWasmMemory.setBigInt64(addr, value, false)")
-internal external fun __gobley_wasm_set_long(addr: Int, value: Long)
+@JsFun("(addr) => globalThis.__gobleyWasmMemory.getInt32(addr + 4, true)")
+internal external fun __gobley_wasm_get_long_high(addr: Int): Int
 
-@JsFun("(addr) => globalThis.__gobleyWasmMemory.getFloat32(addr, false)")
+@JsFun("(addr, low, high) => { const value = (BigInt(high >>> 0) << 32n) | BigInt(low >>> 0); globalThis.__gobleyWasmMemory.setBigUint64(addr, value, true); }")
+internal external fun __gobley_wasm_set_long_parts(addr: Int, low: Int, high: Int)
+
+@JsFun("() => globalThis.__gobleyLongScratchLow | 0")
+internal external fun __gobley_wasm_get_long_scratch_low(): Int
+
+@JsFun("() => globalThis.__gobleyLongScratchHigh | 0")
+internal external fun __gobley_wasm_get_long_scratch_high(): Int
+
+@JsFun("(addr) => globalThis.__gobleyWasmMemory.getFloat32(addr, true)")
 internal external fun __gobley_wasm_get_float(addr: Int): Float
 
-@JsFun("(addr, value) => globalThis.__gobleyWasmMemory.setFloat32(addr, value, false)")
+@JsFun("(addr, value) => globalThis.__gobleyWasmMemory.setFloat32(addr, value, true)")
 internal external fun __gobley_wasm_set_float(addr: Int, value: Float)
 
-@JsFun("(addr) => globalThis.__gobleyWasmMemory.getFloat64(addr, false)")
+@JsFun("(addr) => globalThis.__gobleyWasmMemory.getFloat64(addr, true)")
 internal external fun __gobley_wasm_get_double(addr: Int): Double
 
-@JsFun("(addr, value) => globalThis.__gobleyWasmMemory.setFloat64(addr, value, false)")
+@JsFun("(addr, value) => globalThis.__gobleyWasmMemory.setFloat64(addr, value, true)")
 internal external fun __gobley_wasm_set_double(addr: Int, value: Double)
 
 // Bulk byte transfer between Kotlin `ByteArray` and Rust linear memory.
@@ -96,9 +113,19 @@ internal object WasmMemoryView {
 
     fun setInt(addr: Pointer, value: Int): Unit = __gobley_wasm_set_int(addr, value)
 
-    fun getLong(addr: Pointer): Long = __gobley_wasm_get_long(addr)
+    fun getLong(addr: Pointer): Long {
+        val low = __gobley_wasm_get_long_low(addr)
+        val high = __gobley_wasm_get_long_high(addr)
+        return (high.toLong() shl 32) or (low.toLong() and 0xFFFF_FFFFL)
+    }
 
-    fun setLong(addr: Pointer, value: Long): Unit = __gobley_wasm_set_long(addr, value)
+    fun setLong(addr: Pointer, value: Long): Unit {
+        __gobley_wasm_set_long_parts(
+            addr,
+            value.toInt(),
+            (value shr 32).toInt(),
+        )
+    }
 
     fun getFloat(addr: Pointer): Float = __gobley_wasm_get_float(addr)
 
@@ -121,4 +148,10 @@ internal object WasmMemoryView {
             __gobley_wasm_set_byte(addr + i, src[i])
         }
     }
+}
+
+internal fun gobleyLongFromScratch(): Long {
+    val low = __gobley_wasm_get_long_scratch_low()
+    val high = __gobley_wasm_get_long_scratch_high()
+    return (high.toLong() shl 32) or (low.toLong() and 0xFFFF_FFFFL)
 }

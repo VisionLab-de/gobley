@@ -47,10 +47,12 @@ internal fun readUniffiRustCallStatusByValue(ptr: Pointer): UniffiRustCallStatus
 }
 
 
-// Resolve the function-table index for the exported
-// `gobley_async_continuation_callback` shim that the Rust future-poll ABI
-// expects.
-@JsFun("() => { const table = globalThis.__gobleyIndirectFunctionTable; const callback = globalThis.__gobleyKotlinExports?.gobley_async_continuation_callback ?? globalThis.gobley_async_continuation_callback; if (table == null || callback == null) { throw new Error('gobley wasmJs async callback index unavailable before initialization'); } for (let i = 0; i < table.length; i++) { if (table.get(i) === callback) return i; } throw new Error('gobley wasmJs async continuation callback not found in __indirect_function_table'); }")
+// Resolve the async continuation callback's indirect function table index.
+// The callback is injected into the Rust module via function-import injection
+// (gobley-wasm-transformer's inject_function_imports) and bound to the
+// Kotlin @JsExport function by the .mjs helper during init().
+// After init(), it's in the table — scan for the matching function ref.
+@JsFun("() => { const table = globalThis.__gobleyIndirectFunctionTable; const cb = globalThis.__gobleyKotlinExports?.gobley_{{ ci.namespace() }}_async_continuation_callback; if (table == null || cb == null) { throw new Error('gobley: async callback not available — call uniffiEnsureInitializedAsync() first'); } for (let i = 0; i < table.length; i++) { try { if (table.get(i) === cb) return i; } catch(e) {} } throw new Error('gobley: async continuation callback not found in indirect function table'); }")
 internal external fun __gobley_async_continuation_callback_index(): Int
 
 internal val UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK_INDEX: Int by lazy {
@@ -102,7 +104,7 @@ internal fun uniffiOpaqueCallbackIndex(callback: Any?): Int? {
 // Resolve the function-table index for the exported
 // `gobley_foreign_future_free` shim that Rust stores in
 // `UniffiForeignFuture.free`.
-@JsFun("() => { const table = globalThis.__gobleyIndirectFunctionTable; const callback = globalThis.__gobleyKotlinExports?.gobley_foreign_future_free ?? globalThis.gobley_foreign_future_free; if (table == null || callback == null) { throw new Error('gobley wasmJs foreign-future free index unavailable before initialization'); } for (let i = 0; i < table.length; i++) { if (table.get(i) === callback) return i; } throw new Error('gobley wasmJs foreign-future free callback not found in __indirect_function_table'); }")
+@JsFun("() => { const table = globalThis.__gobleyIndirectFunctionTable; const callback = globalThis.__gobleyKotlinExports?.gobley_{{ ci.namespace() }}_foreign_future_free ?? globalThis.gobley_{{ ci.namespace() }}_foreign_future_free; if (table == null || callback == null) { throw new Error('gobley wasmJs foreign-future free index unavailable before initialization'); } for (let i = 0; i < table.length; i++) { if (table.get(i) === callback) return i; } throw new Error('gobley wasmJs foreign-future free callback not found in __indirect_function_table'); }")
 internal external fun __gobley_foreign_future_free_index(): Int
 
 internal val UNIFFI_FOREIGN_FUTURE_FREE_INDEX: Int by lazy {

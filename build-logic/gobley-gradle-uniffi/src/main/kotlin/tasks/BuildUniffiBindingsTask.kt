@@ -88,6 +88,15 @@ abstract class BuildUniffiBindingsTask : CargoPackageTask() {
     val crateName: Provider<String> = cargoPackage.map { it.libraryCrateName }
 
     /**
+     * When non-empty, overrides [crateName] to generate bindings for multiple UniFFI crates
+     * from a single cdylib. The `--crate` argument is omitted so uniffi-bindgen discovers
+     * all crates embedded in the library.
+     */
+    @get:Input
+    @get:Optional
+    abstract val crateNames: ListProperty<String>
+
+    /**
      * Path to the UDL file, or cdylib if `library-mode` is specified
      */
     @get:InputFile
@@ -137,7 +146,8 @@ abstract class BuildUniffiBindingsTask : CargoPackageTask() {
             if (libraryMode.get()) {
                 arguments("--library")
             }
-            if (crateName.isPresent) {
+            val multiCrate = crateNames.getOrElse(emptyList())
+            if (multiCrate.isEmpty() && crateName.isPresent) {
                 arguments("--crate", crateName.get())
             }
             if (formatCode.isPresent && formatCode.get()) {

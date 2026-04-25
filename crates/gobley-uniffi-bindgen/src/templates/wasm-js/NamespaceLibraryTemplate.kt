@@ -128,15 +128,26 @@ internal object UniffiLib {
     UniffiLib
 }
 
-// Async-safe variant for use from a Kotlin/Wasm `suspend fun main`.
-// T0.C.3 fills in the actual `WebAssembly.instantiate` Promise await.
-// Both sync + async variants exist per T0.B Issue #9: Kotlin/Wasm browsers
-// prohibit synchronous `WebAssembly.instantiate` for modules >4KB, so async
-// is mandatory in browser hosts; sync stays for non-browser hosts (Node, JVM
-// embedders) where the cdylib is already instantiable synchronously.
+// T0.C.3: Async Rust wasm initialization.
+//
+// Loads the Rust cdylib wasm module, instantiates it via the
+// gobley_<crate>_wasmjs_helpers.mjs shim, and populates
+// globalThis.__gobleyRustExports before any FFI call.
+// Idempotent — second call is a no-op if already initialized.
+
+@JsFun("(b64) => { if (globalThis.__gobleyRustExports) return Promise.resolve(); if (typeof wasmExports !== 'undefined' && !globalThis.__gobleyKotlinExports) { globalThis.__gobleyKotlinExports = wasmExports; } const bin = atob(b64); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return import('./gobley_{{ config.cdylib_name() }}_wasmjs_helpers.mjs').then(m => m.init(u8.buffer, { kotlinExports: globalThis.__gobleyKotlinExports })); }")
+internal external fun __gobley_init_rust_wasm(base64: String): kotlin.js.JsAny
+
 {{ visibility() }}suspend fun uniffiEnsureInitializedAsync() {
-    // TODO(T0.C.3): await `WebAssembly.instantiate(rustBytes, imports)`,
-    // bind exports to UniffiLib, query each callback interface's
-    // `vtable_index(method_id)` exports and cache them on the Kotlin side.
+    val b64 = gobley.wasm.{{ config.cdylib_name() }}.GOBLEY_WASM_BASE64
+    val promise = __gobley_init_rust_wasm(b64)
+    @Suppress("UNCHECKED_CAST_TO_EXTERNAL_INTERFACE")
+    val jsPromise = promise as kotlin.js.Promise<kotlin.js.JsAny?>
+    kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
+        jsPromise.then(
+            onFulfilled = { _ -> cont.resume(Unit) { _, _, _ -> } ; null },
+            onRejected = { err -> cont.cancel(kotlin.coroutines.cancellation.CancellationException("gobley wasm init failed: $err")); null },
+        )
+    }
     uniffiEnsureInitialized()
 }

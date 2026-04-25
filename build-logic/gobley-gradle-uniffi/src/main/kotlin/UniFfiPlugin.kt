@@ -22,6 +22,7 @@ import gobley.gradle.uniffi.dsl.BindingsGeneration
 import gobley.gradle.uniffi.dsl.BindingsGenerationFromLibrary
 import gobley.gradle.uniffi.dsl.BindingsGenerationFromUdl
 import gobley.gradle.uniffi.dsl.UniFfiExtension
+import gobley.gradle.cargo.tasks.TransformWasmTask
 import gobley.gradle.uniffi.tasks.BuildUniffiBindingsTask
 import gobley.gradle.uniffi.tasks.GenerateUniffiProguardRulesTask
 import gobley.gradle.uniffi.tasks.InstallUniffiBindgenTask
@@ -86,6 +87,7 @@ class UniFfiPlugin : Plugin<Project> {
         findRequiredExtensions()
         checkKotlinTargets()
         configureBindingTasks()
+        configureWasmCallbackImports()
         configureKotlin()
         configureCleanTasks()
 
@@ -323,6 +325,10 @@ class UniFfiPlugin : Plugin<Project> {
                 is BindingsGenerationFromLibrary -> {
                     libraryMode.set(true)
                     source.set(bindingsOutputFile)
+                    val multiCrates = bindingsGeneration.crates.getOrElse(emptyList())
+                    if (multiCrates.isNotEmpty()) {
+                        crateNames.set(multiCrates)
+                    }
                 }
             }
             dependsOn(cargoBuildTaskForBindings, installBindgen, mergeUniffiConfig)
@@ -522,21 +528,46 @@ class UniFfiPlugin : Plugin<Project> {
         }
     }
 
+    /**
+     * Wire the bindgen-generated wasm callback imports file to the wasm
+     * transformer. The bindgen emits `wasm_callback_imports.txt` alongside
+     * the Kotlin bindings; the transformer injects those as `gobley_callbacks`
+     * imports into the Rust wasm binary's indirect function table.
+     */
+    private fun Project.configureWasmCallbackImports() {
+        val importsFile = bindingsDirectory.map {
+            it.file("wasm_callback_imports.txt")
+        }
+
+        tasks.withType<TransformWasmTask> {
+            functionImportsFile.set(importsFile)
+            dependsOn(tasks.named("buildUniffiBindings"))
+        }
+    }
+
     private fun Project.configureKotlinNativeTarget(
         kotlinNativeTarget: KotlinNativeTarget,
         dummyDefFile: Provider<RegularFile>,
         generateDummyDefFileTask: TaskProvider<Task>,
     ) {
-        val namespace = bindingsGeneration.namespace.get()
+        val namespaces = if (bindingsGeneration is BindingsGenerationFromLibrary) {
+            val crates = (bindingsGeneration as BindingsGenerationFromLibrary).crates.getOrElse(emptyList())
+            crates.ifEmpty { listOf(bindingsGeneration.namespace.get()) }
+        } else {
+            listOf(bindingsGeneration.namespace.get())
+        }
+
         kotlinNativeTarget.compilations.getByName("main") {
-            cinterops.register(TASK_GROUP) {
-                packageName("$namespace.cinterop")
-                header(project.nativeBindingsCInteropHeader(namespace))
-                // Since linking is handled by CargoPlugin and header is fed above, we don't need the defFile.
-                defFile(dummyDefFile)
-                tasks.named(interopProcessingTaskName) {
-                    inputs.file(dummyDefFile)
-                    dependsOn(generateDummyDefFileTask)
+            for (ns in namespaces) {
+                val cinteropName = if (namespaces.size == 1) TASK_GROUP else "${TASK_GROUP}_$ns"
+                cinterops.register(cinteropName) {
+                    packageName("$ns.cinterop")
+                    header(project.nativeBindingsCInteropHeader(ns))
+                    defFile(dummyDefFile)
+                    tasks.named(interopProcessingTaskName) {
+                        inputs.file(dummyDefFile)
+                        dependsOn(generateDummyDefFileTask)
+                    }
                 }
             }
             defaultSourceSet {

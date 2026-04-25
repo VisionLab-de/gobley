@@ -37,12 +37,31 @@ package {{ package_name }}
 // `createInstance(...)`. The .mjs shim owns instantiation; the Kotlin
 // side just hands over the bytes.
 
-// Base64-encoded Rust `wasm32-unknown-unknown` cdylib bytes. Decoded by
-// the host before passing into `init(...)` from the .mjs shim. Identical
-// payload to the Kotlin/JS `BASE64` constant — same upstream WASM module
-// after `Transformer::transform()` (stack-pointer shim, function imports,
-// optional wasm-bindgen rewrites).
-internal const val GOBLEY_WASM_BASE64: String = "{{ base64 }}"
+// Base64-encoded Rust `wasm32-unknown-unknown` cdylib bytes. Kept in grouped
+// chunks because Kotlin/Wasm can crash while lowering very large string
+// literals or very large fixed-array initializers. Decoded by the host before
+// passing into `init(...)` from the .mjs shim. Identical payload to the
+// Kotlin/JS `BASE64` constant — same upstream WASM module after
+// `Transformer::transform()` (stack-pointer shim, function imports, optional
+// wasm-bindgen rewrites).
+private val GOBLEY_WASM_BASE64_CHUNK_GROUPS: Array<Array<String>> = arrayOf(
+{%- for group in base64_chunk_groups() %}
+    arrayOf(
+    {%- for chunk in group %}
+        "{{ chunk }}"{% if !loop.last %},{% endif %}
+    {%- endfor %}
+    ){% if !loop.last %},{% endif %}
+{%- endfor %}
+)
+
+internal val GOBLEY_WASM_BASE64: String
+    get() = buildString {
+        for (group in GOBLEY_WASM_BASE64_CHUNK_GROUPS) {
+            for (chunk in group) {
+                append(chunk)
+            }
+        }
+    }
 
 // Convenience accessor: decode the embedded WASM cdylib to a `ByteArray`.
 //
@@ -60,47 +79,74 @@ internal const val GOBLEY_WASM_BASE64: String = "{{ base64 }}"
 // dance — this differs across Kotlin/Wasm versions and we intentionally
 // don't bake the conversion in here.
 internal fun gobleyWasmBytes(): ByteArray {
-    return gobleyDecodeBase64(GOBLEY_WASM_BASE64)
+    return gobleyDecodeBase64(GOBLEY_WASM_BASE64_CHUNK_GROUPS)
 }
 
-private fun gobleyDecodeBase64(input: String): ByteArray {
-    // Strip padding to compute exact output length without a second pass.
-    var paddedLen = input.length
-    while (paddedLen > 0 && input[paddedLen - 1] == '=') {
-        paddedLen--
+private fun gobleyDecodeBase64(chunkGroups: Array<Array<String>>): ByteArray {
+    val inputLen = gobleyBase64Length(chunkGroups)
+
+    var padding = 0
+    val lastChunk = gobleyLastBase64Chunk(chunkGroups)
+    if (lastChunk.isNotEmpty()) {
+        if (lastChunk.endsWith("==")) {
+            padding = 2
+        } else if (lastChunk.endsWith("=")) {
+            padding = 1
+        }
     }
-    val outputLen = paddedLen * 3 / 4
+    val outputLen = (inputLen * 3 / 4) - padding
     val output = ByteArray(outputLen)
 
-    var inIdx = 0
     var outIdx = 0
     var buffer = 0
     var bufferBits = 0
-    val end = input.length
 
-    while (inIdx < end) {
-        val c = input[inIdx]
-        inIdx++
-        if (c == '=') {
-            // Padding terminates the stream; remaining buffer bits are zero
-            // by construction for valid base64 input.
-            break
-        }
-        val v = gobleyBase64CharValue(c)
-        if (v < 0) {
-            // Tolerate whitespace silently — base64 producers may wrap.
-            continue
-        }
-        buffer = (buffer shl 6) or v
-        bufferBits += 6
-        if (bufferBits >= 8) {
-            bufferBits -= 8
-            output[outIdx] = ((buffer ushr bufferBits) and 0xFF).toByte()
-            outIdx++
+    for (group in chunkGroups) {
+        for (chunk in group) {
+            for (inIdx in 0 until chunk.length) {
+                val c = chunk[inIdx]
+                if (c == '=') {
+                    // Padding terminates the stream; remaining buffer bits are
+                    // zero by construction for valid base64 input.
+                    return output
+                }
+                val v = gobleyBase64CharValue(c)
+                if (v < 0) {
+                    // Tolerate whitespace silently — base64 producers may wrap.
+                    continue
+                }
+                buffer = (buffer shl 6) or v
+                bufferBits += 6
+                if (bufferBits >= 8) {
+                    bufferBits -= 8
+                    output[outIdx] = ((buffer ushr bufferBits) and 0xFF).toByte()
+                    outIdx++
+                }
+            }
         }
     }
 
     return output
+}
+
+private fun gobleyBase64Length(chunkGroups: Array<Array<String>>): Int {
+    var length = 0
+    for (group in chunkGroups) {
+        for (chunk in group) {
+            length += chunk.length
+        }
+    }
+    return length
+}
+
+private fun gobleyLastBase64Chunk(chunkGroups: Array<Array<String>>): String {
+    for (groupIndex in chunkGroups.lastIndex downTo 0) {
+        val group = chunkGroups[groupIndex]
+        if (group.isNotEmpty()) {
+            return group[group.lastIndex]
+        }
+    }
+    return ""
 }
 
 private fun gobleyBase64CharValue(c: Char): Int {

@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "gobley-wasm-transformer"
-version = "0.3.7"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "askama",

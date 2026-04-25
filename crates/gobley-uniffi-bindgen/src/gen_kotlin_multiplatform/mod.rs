@@ -1289,7 +1289,20 @@ mod wasm_calls {
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>()
             .join(", ");
+        let js_call_args = raw_call_js_args(func)?.join(", ");
         let raw_return = raw_return_type(func.return_type())?;
+        let uses_i64_return_bridge = matches!(
+            func.return_type(),
+            Some(FfiType::Int64 | FfiType::UInt64 | FfiType::Handle)
+        );
+
+        if params.is_empty() && uses_i64_return_bridge {
+            return Ok(format!(
+                "@JsFun(\"() => {{ const value = globalThis.__gobleyRustExports.{name}(); globalThis.__gobleyLongScratchLow = Number(BigInt.asIntN(32, value)); globalThis.__gobleyLongScratchHigh = Number(BigInt.asIntN(32, value >> 32n)); }}\")\n\
+                 internal external fun __gobley_call_{name}(): Unit",
+                name = func.name(),
+            ));
+        }
 
         if params.is_empty() {
             return Ok(format!(
@@ -1305,8 +1318,18 @@ mod wasm_calls {
             .collect::<Vec<_>>()
             .join("\n");
 
+        if uses_i64_return_bridge {
+            return Ok(format!(
+                "@JsFun(\"({js_params}) => {{ const value = globalThis.__gobleyRustExports.{name}({js_call_args}); globalThis.__gobleyLongScratchLow = Number(BigInt.asIntN(32, value)); globalThis.__gobleyLongScratchHigh = Number(BigInt.asIntN(32, value >> 32n)); }}\")\n\
+                 internal external fun __gobley_call_{name}(\n\
+                 {kotlin_params}\n\
+                 ): Unit",
+                name = func.name(),
+            ));
+        }
+
         Ok(format!(
-            "@JsFun(\"({js_params}) => globalThis.__gobleyRustExports.{name}({js_params})\")\n\
+            "@JsFun(\"({js_params}) => globalThis.__gobleyRustExports.{name}({js_call_args})\")\n\
              internal external fun __gobley_call_{name}(\n\
              {kotlin_params}\n\
              ): {raw_return}",
@@ -1318,6 +1341,32 @@ mod wasm_calls {
         func: &FfiFunction,
         ci: &ComponentInterface,
     ) -> Result<String, Error> {
+        let uses_i64_return_bridge = matches!(
+            func.return_type(),
+            Some(FfiType::Int64 | FfiType::UInt64 | FfiType::Handle)
+        );
+
+        // Collect RustBuffer args that need stack-frame lowering.
+        let mut rb_lowering_preamble = Vec::new();
+        let mut rb_frame_size: usize = 0;
+        let mut rb_arg_indices = std::collections::HashMap::new();
+        for (idx, arg) in func.arguments().into_iter().enumerate() {
+            if matches!(arg.type_(), FfiType::RustBuffer(_)) {
+                let kotlin_name = KotlinCodeOracle.var_name(arg.name());
+                let local = local_rust_buffer_expr(&kotlin_name, &arg.type_(), ci);
+                let ptr_name = format!("__uniffiRbPtr{idx}");
+                rb_arg_indices.insert(arg.name().to_string(), ptr_name.clone());
+                let offset = rb_frame_size;
+                rb_lowering_preamble.push(format!(
+                    "val {ptr_name} = __uniffiRbFrameBase + {offset}\n\
+                     WasmMemoryView.setLong({ptr_name} + RustBuffer.OFFSET_CAPACITY, {local}.capacity)\n\
+                     WasmMemoryView.setLong({ptr_name} + RustBuffer.OFFSET_LEN, {local}.len)\n\
+                     WasmMemoryView.setInt({ptr_name} + RustBuffer.OFFSET_DATA, {local}.data ?: 0)"
+                ));
+                rb_frame_size += 24; // RustBuffer.SIZE_BYTES
+            }
+        }
+
         let mut raw_call_args = Vec::new();
         if let Some(return_type) = func.return_type() {
             if needs_sret(return_type) {
@@ -1325,7 +1374,11 @@ mod wasm_calls {
             }
         }
         for arg in func.arguments() {
-            raw_call_args.extend(lower_arg(arg.name(), &arg.type_(), ci)?);
+            if let Some(ptr_name) = rb_arg_indices.get(arg.name()) {
+                raw_call_args.push(ptr_name.clone());
+            } else {
+                raw_call_args.extend(lower_arg(arg.name(), &arg.type_(), ci)?);
+            }
         }
         if func.has_rust_call_status_arg() {
             raw_call_args.push("uniffiCallStatus.ptr".to_string());
@@ -1337,22 +1390,37 @@ mod wasm_calls {
             raw_call_args.join(", ")
         );
 
-        match func.return_type() {
-            None => Ok(raw_call),
+        // Build the core call expression (handles return types).
+        let core_expr = match func.return_type() {
+            None => raw_call.clone(),
             Some(return_type) if needs_sret(return_type) => {
                 let frame_size = wasm_layout::size_of(return_type);
                 let lifted = lift_sret_return(return_type, "uniffiOutReturnPtr", ci)?;
-                Ok(format!(
+                format!(
                     "return withWasmStackFrame({frame_size}) {{ uniffiOutReturnPtr ->\n\
                      \x20           {raw_call}\n\
                      \x20           {lifted}\n\
                      \x20       }}"
-                ))
+                )
             }
-            Some(return_type) => Ok(format!(
-                "return {}",
-                lift_direct_return(return_type, &raw_call)?
-            )),
+            Some(_) if uses_i64_return_bridge => format!(
+                "{raw_call}\n\
+                 return gobleyLongFromScratch()"
+            ),
+            Some(return_type) => format!("return {}", lift_direct_return(return_type, &raw_call)?),
+        };
+
+        // Wrap with RustBuffer stack frame if needed.
+        if rb_lowering_preamble.is_empty() {
+            Ok(core_expr)
+        } else {
+            let preamble = rb_lowering_preamble.join("\n");
+            Ok(format!(
+                "withWasmStackFrame({rb_frame_size}) {{ __uniffiRbFrameBase ->\n\
+                 {preamble}\n\
+                 {core_expr}\n\
+                 }}"
+            ))
         }
     }
 
@@ -1377,9 +1445,10 @@ mod wasm_calls {
             FfiType::Int8 | FfiType::UInt8 => vec![(base.to_string(), "Byte".to_string())],
             FfiType::Int16 | FfiType::UInt16 => vec![(base.to_string(), "Short".to_string())],
             FfiType::Int32 | FfiType::UInt32 => vec![(base.to_string(), "Int".to_string())],
-            FfiType::Int64 | FfiType::UInt64 | FfiType::Handle => {
-                vec![(base.to_string(), "Long".to_string())]
-            }
+            FfiType::Int64 | FfiType::UInt64 | FfiType::Handle => vec![
+                (format!("{base}Low"), "Int".to_string()),
+                (format!("{base}High"), "Int".to_string()),
+            ],
             FfiType::Float32 => vec![(base.to_string(), "Float".to_string())],
             FfiType::Float64 => vec![(base.to_string(), "Double".to_string())],
             FfiType::RustArcPtr(_)
@@ -1388,15 +1457,56 @@ mod wasm_calls {
             | FfiType::Reference(_)
             | FfiType::MutReference(_)
             | FfiType::VoidPointer => vec![(base.to_string(), "Int".to_string())],
-            FfiType::RustBuffer(_) => vec![
-                (format!("{base}Capacity"), "Long".to_string()),
-                (format!("{base}Len"), "Long".to_string()),
-                (format!("{base}Data"), "Int".to_string()),
-            ],
+            FfiType::RustBuffer(_) => vec![(base.to_string(), "Int".to_string())],
             FfiType::ForeignBytes => vec![
                 (format!("{base}Len"), "Int".to_string()),
                 (format!("{base}Data"), "Int".to_string()),
             ],
+            FfiType::RustCallStatus => {
+                return Err(to_askama_error(
+                    "RustCallStatus only travels as an explicit out-status arg",
+                ));
+            }
+        })
+    }
+
+    fn raw_call_js_args(func: &FfiFunction) -> Result<Vec<String>, Error> {
+        let mut args = Vec::new();
+        if let Some(return_type) = func.return_type() {
+            if needs_sret(return_type) {
+                args.push("uniffiOutReturnPtr".to_string());
+            }
+        }
+        for (idx, arg) in func.arguments().into_iter().enumerate() {
+            args.extend(raw_type_js_args(&arg.type_(), &format!("arg{idx}"))?);
+        }
+        if func.has_rust_call_status_arg() {
+            args.push("uniffiCallStatusPtr".to_string());
+        }
+        Ok(args)
+    }
+
+    fn raw_type_js_args(type_: &FfiType, base: &str) -> Result<Vec<String>, Error> {
+        Ok(match type_ {
+            FfiType::Int8
+            | FfiType::UInt8
+            | FfiType::Int16
+            | FfiType::UInt16
+            | FfiType::Int32
+            | FfiType::UInt32
+            | FfiType::Float32
+            | FfiType::Float64
+            | FfiType::RustArcPtr(_)
+            | FfiType::Callback(_)
+            | FfiType::Struct(_)
+            | FfiType::Reference(_)
+            | FfiType::MutReference(_)
+            | FfiType::VoidPointer => vec![base.to_string()],
+            FfiType::Int64 | FfiType::UInt64 | FfiType::Handle => vec![format!(
+                "BigInt.asIntN(64, (BigInt({base}High >>> 0) << 32n) | BigInt({base}Low >>> 0))"
+            )],
+            FfiType::RustBuffer(_) => vec![base.to_string()],
+            FfiType::ForeignBytes => vec![format!("{base}Len"), format!("{base}Data")],
             FfiType::RustCallStatus => {
                 return Err(to_askama_error(
                     "RustCallStatus only travels as an explicit out-status arg",
@@ -1443,12 +1553,13 @@ mod wasm_calls {
             | FfiType::UInt16
             | FfiType::Int32
             | FfiType::UInt32
-            | FfiType::Int64
-            | FfiType::UInt64
             | FfiType::Float32
             | FfiType::Float64
-            | FfiType::Handle
             | FfiType::VoidPointer => vec![kotlin_name],
+            FfiType::Int64 | FfiType::UInt64 | FfiType::Handle => vec![
+                format!("gobleyLongLow({kotlin_name})"),
+                format!("gobleyLongHigh({kotlin_name})"),
+            ],
             FfiType::RustArcPtr(_) => vec![format!("{kotlin_name} ?: 0")],
             // Callback args (vs. callback fields inside FFI structs) only exist in
             // uniffi's codegen for async-future continuation plumbing today. The
@@ -1478,12 +1589,9 @@ mod wasm_calls {
                 vec![format!("{kotlin_name}.ptr")]
             }
             FfiType::RustBuffer(_) => {
-                let local = local_rust_buffer_expr(&kotlin_name, type_, ci);
-                vec![
-                    format!("{local}.capacity"),
-                    format!("{local}.len"),
-                    format!("{local}.data ?: 0"),
-                ]
+                return Err(to_askama_error(
+                    "RustBuffer args should be handled via rb_arg_indices in render_function_body",
+                ));
             }
             FfiType::ForeignBytes => vec![
                 format!("{kotlin_name}.len"),

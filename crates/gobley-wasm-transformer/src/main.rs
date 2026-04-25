@@ -58,11 +58,11 @@ struct Cli {
     /// (back-compat with the pre-T0.C.6.b pipeline).
     ///
     /// The wasmJs Kotlin file is intentionally minimal: package
-    /// declaration, the `GOBLEY_WASM_BASE64` constant, and a small
-    /// `gobleyWasmBytes()` decoder. The actual `WebAssembly.instantiate`
-    /// call lives in the per-crate `.mjs` shim emitted to `--mjs-output`,
-    /// not in this Kotlin file. See `KotlinWasmJsRenderer` doc comment
-    /// in `lib.rs` for the full rationale.
+    /// declaration, chunked base64 bytes, and a small `gobleyWasmBytes()`
+    /// decoder. The actual `WebAssembly.instantiate` call lives in the
+    /// per-crate `.mjs` shim emitted to `--mjs-output`, not in this Kotlin
+    /// file. See `KotlinWasmJsRenderer` doc comment in `lib.rs` for the
+    /// full rationale.
     #[clap(long)]
     wasmjs_output: Option<Utf8PathBuf>,
 
@@ -124,7 +124,8 @@ fn main() -> anyhow::Result<()> {
                     "--crate-name is required when --mjs-output is set, and could not be inferred from input file name"
                 )
             })?;
-        let mjs_transformer = Transformer::new(&input_bytes, vec![])?;
+        let mut mjs_transformer = Transformer::new(&input_bytes, function_imports.clone())?;
+        mjs_transformer.transform_all()?;
         let mjs_content = mjs_transformer.render_into_mjs(&crate_name)?;
         if let Some(parent) = mjs_output_path.parent() {
             fs::create_dir_all(parent)

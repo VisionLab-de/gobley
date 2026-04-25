@@ -61,7 +61,7 @@ internal val uniffiRustFutureContinuationCallbackCallback: UniffiRustFutureConti
 // function suffices for the whole binding because the continuation ABI
 // is `(callback_data: u64, poll_result: u8) -> ()` for every async fn.
 @JsExport
-public fun gobley_async_continuation_callback(data: Long, pollResult: Byte) {
+public fun gobley_{{ ci.namespace() }}_async_continuation_callback(data: Long, pollResult: Byte) {
     uniffiContinuationHandleMap.remove(data).resume(pollResult)
 }
 
@@ -82,7 +82,7 @@ internal val uniffiForeignFutureFreeImpl: UniffiForeignFutureFree =
 // drops a foreign future the Kotlin side launched. Cancels the Kotlin
 // `Job` if the coroutine is still running.
 @JsExport
-public fun gobley_foreign_future_free(handle: Long) {
+public fun gobley_{{ ci.namespace() }}_foreign_future_free(handle: Long) {
     val job = uniffiForeignFutureHandleMap.remove(handle)
     if (!job.isCompleted) {
         job.cancel()

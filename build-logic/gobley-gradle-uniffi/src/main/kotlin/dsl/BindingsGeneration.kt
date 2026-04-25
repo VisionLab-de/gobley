@@ -12,6 +12,7 @@ import gobley.gradle.rust.targets.RustTarget
 import org.gradle.api.Action
 import org.gradle.api.Project
 import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
 import org.gradle.kotlin.dsl.invoke
@@ -102,7 +103,14 @@ sealed class BindingsGeneration(internal val project: Project) {
 }
 
 abstract class BindingsGenerationFromLibrary @Inject internal constructor(project: Project) :
-    BindingsGeneration(project)
+    BindingsGeneration(project) {
+    /**
+     * When set, generates bindings for multiple UniFFI crates from a single cdylib.
+     * The bindgen CLI is invoked without `--crate`, so it discovers all crates in the
+     * library. Each entry is used to register a native cinterop for Kotlin/Native targets.
+     */
+    abstract val crates: ListProperty<String>
+}
 
 abstract class BindingsGenerationFromUdl @Inject internal constructor(project: Project) :
     BindingsGeneration(project) {

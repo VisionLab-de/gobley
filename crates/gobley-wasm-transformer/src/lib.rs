@@ -233,7 +233,7 @@ impl<'a> KotlinJsRenderer<'a> {
 ///
 /// `KotlinWasmJsRenderer` (this struct) emits a minimal, Kotlin/Wasm-
 /// compatible file: package declaration, the `GOBLEY_WASM_BASE64`
-/// constant, and a small `gobleyWasmBytes()` decoder. Actual
+/// chunks, and a small `gobleyWasmBytes()` decoder. Actual
 /// `WebAssembly.instantiate` happens on the JavaScript side via the
 /// `gobley_<crate>_wasmjs_helpers.mjs` shim emitted by
 /// `KotlinWasmJsHelpersRenderer` (T0.C.6). The bindgen-emitted
@@ -249,6 +249,27 @@ impl<'a> KotlinJsRenderer<'a> {
 pub(crate) struct KotlinWasmJsRenderer<'a> {
     package_name: Option<&'a str>,
     base64: &'a str,
+}
+
+impl KotlinWasmJsRenderer<'_> {
+    fn base64_chunk_groups(&self) -> Vec<Vec<&str>> {
+        const CHUNK_SIZE: usize = 16 * 1024;
+        const CHUNKS_PER_GROUP: usize = 256;
+
+        let chunks = self
+            .base64
+            .as_bytes()
+            .chunks(CHUNK_SIZE)
+            .map(|chunk| {
+                std::str::from_utf8(chunk).expect("base64 encoder should only emit valid ASCII")
+            })
+            .collect::<Vec<_>>();
+
+        chunks
+            .chunks(CHUNKS_PER_GROUP)
+            .map(|group| group.to_vec())
+            .collect()
+    }
 }
 
 /// Well-known import module that gobley-bindgen-emitted Kotlin/Wasm
@@ -289,6 +310,8 @@ struct WasmJsCallbackBinding {
 pub struct KotlinWasmJsHelpersRenderer<'a> {
     crate_name: &'a str,
     callback_bindings: &'a [WasmJsCallbackBinding],
+    wasm_bindgen_modules: &'a [WasmBindgenJsModules],
+    global_entities: &'a [GlobalEntity],
 }
 
 impl KotlinWasmJsHelpersRenderer<'_> {
@@ -305,6 +328,21 @@ impl KotlinWasmJsHelpersRenderer<'_> {
         names.sort_unstable();
         names.dedup();
         names
+    }
+
+    fn wasm_bindgen_module_names(&self) -> Vec<&str> {
+        self.wasm_bindgen_modules
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect()
+    }
+
+    fn wasm_bindgen_factories(&self) -> Vec<(&str, &str)> {
+        self.global_entities
+            .iter()
+            .filter(|e| e.lang == GlobalEntityLang::JavaScript)
+            .map(|e| (e.name.as_str(), e.expr.as_str()))
+            .collect()
     }
 
     /// Rust-side imports the shim must bind to Kotlin `@JsExport`
@@ -331,7 +369,45 @@ impl Transformer {
         if self.needs_wasm_bindgen() {
             self.transform_using_wasm_bindgen()?;
         }
+        // Must run AFTER wasm-bindgen: transform_using_wasm_bindgen replaces
+        // self.module via mem::swap, discarding any exports added earlier.
+        self.export_indirect_function_table();
         Ok(())
+    }
+
+    /// Run the full transformation pipeline (public entry point for
+    /// callers that need the `.mjs` renderer to see all post-transform
+    /// state: injected imports, wasm-bindgen modules, exported table).
+    pub fn transform_all(&mut self) -> anyhow::Result<()> {
+        self.transform()
+    }
+
+    fn export_indirect_function_table(&mut self) {
+        use walrus::RefType;
+        // main_function_table() returns None when multiple funcref tables
+        // exist. Fall back to scanning all tables for Funcref.
+        let table_id = match self.module.tables.main_function_table() {
+            Ok(Some(id)) => Some(id),
+            _ => self
+                .module
+                .tables
+                .iter()
+                .find(|t| t.element_ty == RefType::Funcref)
+                .map(|t| t.id()),
+        };
+        if let Some(table_id) = table_id {
+            // Check by NAME, not just table ID — wasm-bindgen may export the
+            // same table under a different name (e.g. __wbindgen_export_2).
+            let has_correct_name = self.module.exports.iter().any(|e| {
+                e.name == "__indirect_function_table"
+                    && matches!(e.item, walrus::ExportItem::Table(t) if t == table_id)
+            });
+            if !has_correct_name {
+                self.module
+                    .exports
+                    .add("__indirect_function_table", table_id);
+            }
+        }
     }
 
     pub fn render_into_kt(mut self, package_name: Option<&str>) -> anyhow::Result<String> {
@@ -360,9 +436,9 @@ impl Transformer {
     /// classes inside interfaces, no `dynamic`. The actual
     /// `WebAssembly.instantiate` call is delegated to the per-crate JS
     /// shim emitted by `render_into_mjs`; the Kotlin file only carries
-    /// the WASM bytes (`GOBLEY_WASM_BASE64`) plus a stdlib-free base64
-    /// decoder (`gobleyWasmBytes`) — Kotlin/Wasm 2.1.10's stdlib does
-    /// not ship `kotlin.io.encoding.Base64` for the wasmJs target.
+    /// the WASM bytes as chunked base64 plus a stdlib-free base64 decoder
+    /// (`gobleyWasmBytes`) — Kotlin/Wasm 2.1.10's stdlib does not ship
+    /// `kotlin.io.encoding.Base64` for the wasmJs target.
     ///
     /// The transformer pipeline (`transform()`) runs identically to the
     /// Kotlin/JS path so the underlying WASM bytes match exactly across
@@ -402,6 +478,8 @@ impl Transformer {
         let renderer = KotlinWasmJsHelpersRenderer {
             crate_name,
             callback_bindings: &bindings,
+            wasm_bindgen_modules: &self.wasm_bindgen_js_modules,
+            global_entities: &self.global_entities,
         };
         Ok(renderer.render()?)
     }
