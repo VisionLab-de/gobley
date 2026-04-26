@@ -16,13 +16,13 @@ package {{ package_name }}
 //     instance-creating `createInstance(...)` function, and per-module
 //     import structures with `tblIdx_<name>` constants.
 //
-//   * Kotlin/Wasm path (this file) — emits **only** the raw bytes plus
-//     a small set of helpers callable from Kotlin/Wasm. Actual
+//   * Kotlin/Wasm path (this file) — emits the raw bytes plus the JS
+//     helper module source as chunked base64. Actual
 //     `WebAssembly.instantiate` happens on the JavaScript side via the
-//     `gobley_<crate>_wasmjs_helpers.mjs` shim (also emitted by this
-//     transformer; see `KotlinWasmJsHelpersRenderer`). The bindgen-emitted
-//     `wasm-js/NamespaceLibraryTemplate.kt` wires `UniffiLib` to those
-//     bytes through `init(...)` once T0.C.3.b lands.
+//     embedded `gobley_<crate>_wasmjs_helpers.mjs` shim (rendered by
+//     `KotlinWasmJsHelpersRenderer` and surfaced here as a data URL).
+//     The bindgen-emitted `wasm-js/NamespaceLibraryTemplate.kt` wires
+//     `UniffiLib` to those bytes through `init(...)` once T0.C.3.b lands.
 //
 // Why two outputs and not a shared one: Kotlin/Wasm forbids the legacy
 // Kotlin/JS interop surface that the JS path depends on:
@@ -81,6 +81,35 @@ internal val GOBLEY_WASM_BASE64: String
 internal fun gobleyWasmBytes(): ByteArray {
     return gobleyDecodeBase64(GOBLEY_WASM_BASE64_CHUNK_GROUPS)
 }
+
+// Base64-encoded contents of the helper ES module that instantiates the Rust
+// wasm and exposes globals consumed by inline `@JsFun` bridges. Embedding the
+// helper source here avoids relative-path module resolution in downstream
+// webpack bundles.
+private val GOBLEY_WASMJS_HELPERS_BASE64_CHUNK_GROUPS: Array<Array<String>> = arrayOf(
+{%- for group in helpers_base64_chunk_groups() %}
+    arrayOf(
+    {%- for chunk in group %}
+        "{{ chunk }}"{% if !loop.last %},{% endif %}
+    {%- endfor %}
+    ){% if !loop.last %},{% endif %}
+{%- endfor %}
+)
+
+internal val GOBLEY_WASMJS_HELPERS_BASE64: String
+    get() = buildString {
+        for (group in GOBLEY_WASMJS_HELPERS_BASE64_CHUNK_GROUPS) {
+            for (chunk in group) {
+                append(chunk)
+            }
+        }
+    }
+
+internal val GOBLEY_WASMJS_HELPERS_MODULE_URL: String
+    get() = buildString {
+        append("data:text/javascript;base64,")
+        append(GOBLEY_WASMJS_HELPERS_BASE64)
+    }
 
 private fun gobleyDecodeBase64(chunkGroups: Array<Array<String>>): ByteArray {
     val inputLen = gobleyBase64Length(chunkGroups)

@@ -742,8 +742,15 @@ class CargoPlugin : Plugin<Project> {
             )
         }
 
+        val transformTask = cargoBuildVariant.transformWasmProvider
+
         kotlinTarget.compilations.getByName("main") {
             compileTaskProvider.dependsOn(buildTask)
+            compileTaskProvider.dependsOn(transformTask)
+        }
+
+        tasks.matching { it.name == "wasmJsProcessResources" }.configureEach {
+            dependsOn(transformTask)
         }
 
         tasks.named("check") {

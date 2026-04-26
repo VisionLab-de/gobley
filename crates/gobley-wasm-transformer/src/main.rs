@@ -58,11 +58,12 @@ struct Cli {
     /// (back-compat with the pre-T0.C.6.b pipeline).
     ///
     /// The wasmJs Kotlin file is intentionally minimal: package
-    /// declaration, chunked base64 bytes, and a small `gobleyWasmBytes()`
-    /// decoder. The actual `WebAssembly.instantiate` call lives in the
-    /// per-crate `.mjs` shim emitted to `--mjs-output`, not in this Kotlin
-    /// file. See `KotlinWasmJsRenderer` doc comment in `lib.rs` for the
-    /// full rationale.
+    /// declaration, chunked base64 wasm bytes, embedded helper-module
+    /// source, and a small `gobleyWasmBytes()` decoder. The actual
+    /// `WebAssembly.instantiate` call still lives in the per-crate
+    /// helper shim, but the wasmJs Kotlin file also embeds that shim as
+    /// a data URL for downstream consumers. See `KotlinWasmJsRenderer`
+    /// doc comment in `lib.rs` for the full rationale.
     #[clap(long)]
     wasmjs_output: Option<Utf8PathBuf>,
 
@@ -105,6 +106,21 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    let resolved_crate_name = if mjs_output.is_some() || wasmjs_output.is_some() {
+        Some(
+            crate_name
+                .clone()
+                .or_else(|| input.file_stem().map(|stem| stem.replace('-', "_")))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--crate-name is required when --mjs-output or --wasmjs-output is set, and could not be inferred from input file name"
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+
     // The Kotlin/JS render path consumes the transformer; if we also
     // need the .mjs shim we have to build a second `Transformer`. Both
     // start from the same source bytes; the .mjs render path does NOT
@@ -112,21 +128,12 @@ fn main() -> anyhow::Result<()> {
     // directly), so the cost is just one extra walrus parse — cheap
     // relative to the bindgen + cargo work upstream.
     if let Some(mjs_output_path) = mjs_output.as_ref() {
-        let crate_name = crate_name
-            .clone()
-            .or_else(|| {
-                input
-                    .file_stem()
-                    .map(|stem| stem.replace('-', "_"))
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--crate-name is required when --mjs-output is set, and could not be inferred from input file name"
-                )
-            })?;
+        let crate_name = resolved_crate_name
+            .as_deref()
+            .expect("crate name must be resolved when emitting the helper module");
         let mut mjs_transformer = Transformer::new(&input_bytes, function_imports.clone())?;
         mjs_transformer.transform_all()?;
-        let mjs_content = mjs_transformer.render_into_mjs(&crate_name)?;
+        let mjs_content = mjs_transformer.render_into_mjs(crate_name)?;
         if let Some(parent) = mjs_output_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create directory `{parent}`"))?;
@@ -143,8 +150,12 @@ fn main() -> anyhow::Result<()> {
     // + one extra `transform()` pass — still cheap next to the cargo
     // build that produced the input.
     if let Some(wasmjs_output_path) = wasmjs_output.as_ref() {
+        let crate_name = resolved_crate_name
+            .as_deref()
+            .expect("crate name must be resolved when emitting wasmJs Kotlin");
         let wasmjs_transformer = Transformer::new(&input_bytes, function_imports.clone())?;
-        let wasmjs_content = wasmjs_transformer.render_into_wasmjs_kt(package_name.as_deref())?;
+        let wasmjs_content =
+            wasmjs_transformer.render_into_wasmjs_kt(package_name.as_deref(), crate_name)?;
         if let Some(parent) = wasmjs_output_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create directory `{parent}`"))?;

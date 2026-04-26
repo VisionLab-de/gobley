@@ -249,15 +249,15 @@ impl<'a> KotlinJsRenderer<'a> {
 pub(crate) struct KotlinWasmJsRenderer<'a> {
     package_name: Option<&'a str>,
     base64: &'a str,
+    helpers_base64: &'a str,
 }
 
 impl KotlinWasmJsRenderer<'_> {
-    fn base64_chunk_groups(&self) -> Vec<Vec<&str>> {
+    fn chunk_groups(base64: &str) -> Vec<Vec<&str>> {
         const CHUNK_SIZE: usize = 16 * 1024;
         const CHUNKS_PER_GROUP: usize = 256;
 
-        let chunks = self
-            .base64
+        let chunks = base64
             .as_bytes()
             .chunks(CHUNK_SIZE)
             .map(|chunk| {
@@ -269,6 +269,14 @@ impl KotlinWasmJsRenderer<'_> {
             .chunks(CHUNKS_PER_GROUP)
             .map(|group| group.to_vec())
             .collect()
+    }
+
+    fn base64_chunk_groups(&self) -> Vec<Vec<&str>> {
+        Self::chunk_groups(self.base64)
+    }
+
+    fn helpers_base64_chunk_groups(&self) -> Vec<Vec<&str>> {
+        Self::chunk_groups(self.helpers_base64)
     }
 }
 
@@ -435,26 +443,34 @@ impl Transformer {
     /// `external fun`, no `org.khronos.webgl.ArrayBuffer`, no nested
     /// classes inside interfaces, no `dynamic`. The actual
     /// `WebAssembly.instantiate` call is delegated to the per-crate JS
-    /// shim emitted by `render_into_mjs`; the Kotlin file only carries
-    /// the WASM bytes as chunked base64 plus a stdlib-free base64 decoder
-    /// (`gobleyWasmBytes`) — Kotlin/Wasm 2.1.10's stdlib does not ship
-    /// `kotlin.io.encoding.Base64` for the wasmJs target.
+    /// shim emitted by `render_into_mjs`; the Kotlin file carries both
+    /// the WASM bytes and the shim source as chunked base64 plus a
+    /// stdlib-free base64 decoder (`gobleyWasmBytes`) — Kotlin/Wasm
+    /// 2.1.10's stdlib does not ship `kotlin.io.encoding.Base64` for
+    /// the wasmJs target.
     ///
     /// The transformer pipeline (`transform()`) runs identically to the
     /// Kotlin/JS path so the underlying WASM bytes match exactly across
     /// targets — same stack-pointer shim, same function-imports
     /// injection, same wasm-bindgen rewrites. Only the Kotlin wrapper
     /// differs.
-    pub fn render_into_wasmjs_kt(mut self, package_name: Option<&str>) -> anyhow::Result<String> {
+    pub fn render_into_wasmjs_kt(
+        mut self,
+        package_name: Option<&str>,
+        crate_name: &str,
+    ) -> anyhow::Result<String> {
         use base64::prelude::BASE64_STANDARD;
 
         self.transform()?;
 
         let wasm = self.module.emit_wasm();
         let wasm_base64 = BASE64_STANDARD.encode(&wasm);
+        let helpers_source = self.render_into_mjs(crate_name)?;
+        let helpers_base64 = BASE64_STANDARD.encode(helpers_source.as_bytes());
         let renderer = KotlinWasmJsRenderer {
             package_name,
             base64: &wasm_base64,
+            helpers_base64: &helpers_base64,
         };
         Ok(renderer.render()?)
     }
@@ -534,6 +550,12 @@ mod tests {
     /// single local function so emitted modules carry a code section.
     fn build_test_wasm() -> Vec<u8> {
         let mut module = Module::default();
+
+        // `transform()` expects the first global to act as the mutable stack
+        // pointer so it can synthesize __gobley_add_to_stack_pointer.
+        module
+            .globals
+            .add_local(ValType::I32, true, false, ConstExpr::Value(Value::I32(0)));
 
         // Rust-side `memory` export — the .mjs shim asserts on its presence.
         let mem_id = module.memories.add_local(false, false, 1, None, None);
@@ -711,5 +733,27 @@ mod tests {
             .expect("M_z present");
         assert!(pos_z < pos_a, "import order Z then A must be preserved");
         assert!(pos_a < pos_m, "import order A then M must be preserved");
+    }
+
+    #[test]
+    fn render_into_wasmjs_kt_embeds_helpers_module_payload() {
+        let wasm = build_test_wasm();
+        let kotlin = Transformer::new(&wasm, vec![])
+            .unwrap()
+            .render_into_wasmjs_kt(Some("gobley.wasm.test"), "embedded_helpers")
+            .expect("wasmJs Kotlin render must succeed");
+
+        assert!(
+            kotlin.contains("GOBLEY_WASMJS_HELPERS_BASE64_CHUNK_GROUPS"),
+            "embedded helper chunks missing: {kotlin}"
+        );
+        assert!(
+            kotlin.contains("GOBLEY_WASMJS_HELPERS_MODULE_URL"),
+            "embedded helper module URL missing: {kotlin}"
+        );
+        assert!(
+            kotlin.contains("data:text/javascript;base64,"),
+            "embedded helper data URL prefix missing: {kotlin}"
+        );
     }
 }
