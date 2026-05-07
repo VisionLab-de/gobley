@@ -59,15 +59,13 @@ fn read_object_exports(bytes: &[u8]) -> Result<Vec<String>> {
 
     let mut out = Vec::new();
     for export in file.exports()? {
-        let Ok(name) = std::str::from_utf8(export.name()) else {
-            continue;
-        };
+        let name = String::from_utf8_lossy(export.name());
         let normalised = if strip_underscore {
-            name.strip_prefix('_').unwrap_or(name)
+            name.strip_prefix('_').unwrap_or(&name).to_string()
         } else {
-            name
+            name.into_owned()
         };
-        out.push(normalised.to_string());
+        out.push(normalised);
     }
     Ok(out)
 }
