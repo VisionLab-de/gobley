@@ -221,6 +221,15 @@ class UniFfiPlugin : Plugin<Project> {
                     ?: it.values.first()
             }
         }
+        // Cdylib path used by the bindgen to auto-derive the crate allowlist
+        // from its export table. Independent of `bindingsOutputFile` above:
+        // staticlib still drives UNIFFI_META input, this drives the export
+        // filter. Resolves to absent when the crate doesn't emit a cdylib —
+        // the task input is `@Optional` so bindgen runs without
+        // `--exported-lib` in that case.
+        val exportedLibFile = cargoBuildTaskForBindings.flatMap { task ->
+            task.libraryFileByCrateType.map { it[CrateType.SystemDynamicLibrary] }
+        }
 
         val installBindgen = tasks.register<InstallUniffiBindgenTask>("installUniffiBindgen") {
             group = TASK_GROUP
@@ -339,6 +348,11 @@ class UniFfiPlugin : Plugin<Project> {
                 is BindingsGenerationFromLibrary -> {
                     libraryMode.set(true)
                     source.set(bindingsOutputFile)
+                    // Always pass the cdylib for export-derived allowlist when
+                    // available — single-crate (`--crate`) targets included.
+                    // The provider resolves to absent when the crate doesn't
+                    // emit a cdylib, leaving the @Optional input unset.
+                    exportedLib.set(exportedLibFile)
                     val multiCrates = bindingsGeneration.crates.getOrElse(emptyList())
                     if (multiCrates.isNotEmpty()) {
                         crateNames.set(multiCrates)

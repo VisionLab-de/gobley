@@ -104,6 +104,20 @@ abstract class BuildUniffiBindingsTask : CargoPackageTask() {
     abstract val source: RegularFileProperty
 
     /**
+     * Optional cdylib used to derive the bindgen export allowlist. When set
+     * (and [libraryMode] is true) the bindgen reads the export table from this
+     * file and skips Kotlin generation for crates whose
+     * `ffi_<crate>_uniffi_contract_version` marker is absent. Distinct from
+     * [source]: [source] still feeds bindgen its UNIFFI metadata (typically a
+     * staticlib `.a`), while this points at the shipped dynamic artifact whose
+     * link-time GC actually decides which crates survive.
+     */
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    @get:Optional
+    abstract val exportedLib: RegularFileProperty
+
+    /**
      * Tries to run `ktlint` on the generated bindings
      */
     @get:Input
@@ -145,6 +159,12 @@ abstract class BuildUniffiBindingsTask : CargoPackageTask() {
             }
             if (libraryMode.get()) {
                 arguments("--library")
+                // Pass the shipped cdylib so the bindgen can auto-derive the
+                // crate allowlist from its export table. Only valid alongside
+                // `--library`; bindgen rejects it otherwise.
+                if (exportedLib.isPresent) {
+                    arguments("--exported-lib", exportedLib.get())
+                }
             }
             val multiCrate = crateNames.getOrElse(emptyList())
             if (multiCrate.isEmpty()) {
