@@ -22,10 +22,16 @@ camino = { workspace = true }
 clap = { workspace = true, features = ["derive", "cargo", "std"] }
 fs-err = "2.11.0"
 heck = "0.5.0"
+# `object` covers ELF, Mach-O, and PE export tables but its wasm reader returns
+# no entries for cdylib `.wasm` artefacts, so wasm is dispatched separately via
+# `wasmparser`. The `wasm` feature on `object` is still enabled so File::parse
+# accepts wasm input without erroring before we can dispatch.
+object = { version = "0.36", default-features = false, features = ["read", "std", "wasm"] }
 serde = "1.0.203"
 textwrap = "0.16.1"
 toml = "0.5"
 uniffi_bindgen = { workspace = true }
 uniffi_meta = { workspace = true }
+wasmparser = "0.219"
 # TODO: Remove the following after upgrading MSRV to 1.78. cargo-platform 0.1.9 does not support 1.77 or older.
 cargo-platform = "=0.1.8"

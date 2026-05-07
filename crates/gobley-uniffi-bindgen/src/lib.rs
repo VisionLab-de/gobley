@@ -18,6 +18,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use fs_err as fs;
 use uniffi_bindgen::{BindingGenerator, Component, ComponentInterface, GenerationSettings};
 
+pub mod exports;
+
 mod gen_kotlin_multiplatform;
 use gen_kotlin_multiplatform::{generate_bindings, Config};
 
