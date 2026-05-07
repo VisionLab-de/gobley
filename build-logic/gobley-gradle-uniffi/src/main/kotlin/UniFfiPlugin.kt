@@ -210,9 +210,15 @@ class UniFfiPlugin : Plugin<Project> {
 
         val buildVariantForBindings = build.variant(variant)
         val cargoBuildTaskForBindings = buildVariantForBindings.buildTaskProvider
+        // Prefer SystemStaticLibrary (.a) for bindgen input: archives are
+        // pre-link, never linker-stripped, so UNIFFI_META metadata survives
+        // aggressive `strip = "symbols"` profiles. Fall back to the cdylib
+        // for crates that don't emit `staticlib` in `crate-type`.
         val bindingsOutputFile = cargoBuildTaskForBindings.flatMap { task ->
             task.libraryFileByCrateType.map {
-                it[CrateType.SystemDynamicLibrary] ?: it.values.first()
+                it[CrateType.SystemStaticLibrary]
+                    ?: it[CrateType.SystemDynamicLibrary]
+                    ?: it.values.first()
             }
         }
 
