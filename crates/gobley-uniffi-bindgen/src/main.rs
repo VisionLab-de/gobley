@@ -87,7 +87,7 @@ struct Cli {
     #[clap(long = "format", default_value_t = false)]
     try_format_code: bool,
 
-    /// Path to the UDL file, or cdylib if `library-mode` is specified.
+    /// Path to the UDL file, or staticlib (`.a`) if `--library` is specified.
     source: Utf8PathBuf,
 }
 
@@ -179,7 +179,7 @@ fn main() -> anyhow::Result<()> {
 
     if let (Some(manual), Some(exports)) = (&manual_set, &export_lookup) {
         let stale = check_stale(manual, exports);
-        if stale.len() == manual.len() && !manual.is_empty() {
+        if stale.len() == manual.len() {
             anyhow::bail!(
                 "--crates entries all missing from --exported-lib export table: {stale:?}"
             );
