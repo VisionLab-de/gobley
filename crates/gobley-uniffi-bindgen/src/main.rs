@@ -4,6 +4,23 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
+//! CLI entry point for `gobley-uniffi-bindgen`.
+//!
+//! Forwards to either `uniffi_bindgen::library_mode::generate_bindings` or
+//! `uniffi_bindgen::generate_external_bindings` depending on whether
+//! `--library` is passed. Two allowlist mechanisms gate which UniFFI
+//! components actually get emitted:
+//!
+//! * `--crates a,b,c` is the manual allowlist.
+//! * `--exported-lib path/to/cdylib.{wasm,so,dylib,dll}` derives an allowlist
+//!   from the binary's export table; only crates whose
+//!   `ffi_<crate>_uniffi_contract_version` marker symbol is present in the
+//!   exports survive. Requires `--library`.
+//!
+//! When both flags are present the filters intersect; entries in `--crates`
+//! that are *not* present in the cdylib's export table are reported as a
+//! warning, or as a hard error if every entry is stale.
+
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
@@ -11,7 +28,7 @@ use std::fs;
 use anyhow::Context as _;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
-use gobley_uniffi_bindgen::KotlinBindingGenerator;
+use gobley_uniffi_bindgen::{check_stale, KotlinBindingGenerator};
 use uniffi_bindgen::BindgenCrateConfigSupplier;
 
 #[derive(Parser)]
@@ -57,6 +74,15 @@ struct Cli {
     /// emitting bindings for them produces references to non-existent wasm exports.
     #[clap(long = "crates", value_delimiter = ',')]
     crates: Vec<String>,
+
+    /// Path to the shipped cdylib artifact (.wasm/.so/.dylib/.dll). When provided
+    /// alongside --library, derives the allowlist from the binary's export table:
+    /// only crates whose `ffi_<crate>_uniffi_contract_version` marker symbol is
+    /// present in the exports get bindings emitted. Combined with --crates, takes
+    /// the intersection: `--crates` entries missing from the export table emit a
+    /// warning; if every entry is missing, fails.
+    #[clap(long = "exported-lib")]
+    exported_lib: Option<Utf8PathBuf>,
 
     #[clap(long = "format", default_value_t = false)]
     try_format_code: bool,
@@ -127,16 +153,45 @@ fn main() -> anyhow::Result<()> {
         library_mode,
         crate_name,
         crates,
+        exported_lib,
         source,
         try_format_code,
     } = Cli::parse();
 
-    let allowed_crates: Option<HashSet<String>> = if crates.is_empty() {
+    if exported_lib.is_some() && !library_mode {
+        anyhow::bail!("--exported-lib requires --library");
+    }
+
+    let manual_set: Option<HashSet<String>> = if crates.is_empty() {
         None
     } else {
         Some(crates.into_iter().collect())
     };
-    let binding_generator = KotlinBindingGenerator::new(allowed_crates);
+
+    let export_lookup: Option<HashSet<String>> = match exported_lib.as_ref() {
+        None => None,
+        Some(path) => {
+            let exports = gobley_uniffi_bindgen::exports::read_exports(path.as_std_path())
+                .with_context(|| format!("read --exported-lib {path}"))?;
+            Some(exports.into_iter().collect())
+        }
+    };
+
+    if let (Some(manual), Some(exports)) = (&manual_set, &export_lookup) {
+        let stale = check_stale(manual, exports);
+        if stale.len() == manual.len() && !manual.is_empty() {
+            anyhow::bail!(
+                "--crates entries all missing from --exported-lib export table: {stale:?}"
+            );
+        }
+        if !stale.is_empty() {
+            eprintln!(
+                "warning: --crates entries missing from --exported-lib export table: {stale:?}"
+            );
+        }
+    }
+
+    let binding_generator = KotlinBindingGenerator::new(manual_set, export_lookup);
 
     if library_mode {
         if lib_file.is_some() {

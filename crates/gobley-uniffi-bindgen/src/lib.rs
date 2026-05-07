@@ -4,6 +4,30 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
+//! Kotlin Multiplatform binding generator for UniFFI.
+//!
+//! Entry point for the bindgen library half of `gobley-uniffi-bindgen`. The
+//! [`KotlinBindingGenerator`] type implements `uniffi_bindgen::BindingGenerator`
+//! and emits one Kotlin source set per source-set name (commonMain, jvmMain,
+//! androidMain, nativeMain, wasmJsMain, …) per UniFFI component.
+//!
+//! Two orthogonal allowlist mechanisms gate which components actually get
+//! emitted:
+//!
+//! 1. A manual allowlist (`allowed_crates`) populated from the CLI `--crates`
+//!    flag. When set, only crates whose `crate_name` is in the set are emitted.
+//! 2. An exported-symbol lookup (`export_lookup`) populated from the export
+//!    table of the shipped cdylib via [`exports::read_exports`]. When set, only
+//!    crates whose `ffi_<crate>_uniffi_contract_version` marker symbol is
+//!    present in the library's exports are emitted.
+//!
+//! The two mechanisms intersect: a crate must pass both filters when both are
+//! set. They exist because multi-crate cdylibs that link in shared core libs
+//! (which themselves call `setup_scaffolding!()`) leak UniFFI metadata into the
+//! staticlib's metadata blob, even though those core crates are not
+//! consumer-facing and their FFI symbols may be stripped from the final
+//! cdylib.
+
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -23,26 +47,73 @@ pub mod exports;
 mod gen_kotlin_multiplatform;
 use gen_kotlin_multiplatform::{generate_bindings, Config};
 
-/// Allowlist of crate names whose bindings should be emitted. When `None`, all
-/// components discovered by uniffi library_mode are written. When `Some`,
-/// components whose `crate_name` is not in the set are silently skipped — useful
-/// for multi-crate cdylibs where transitive `setup_scaffolding!()` invocations
-/// (e.g. shared core crates) leak UNIFFI metadata into the staticlib without
-/// being intended consumer-facing.
+/// Format the UniFFI contract-version marker symbol for `crate_name`.
+///
+/// `uniffi::setup_scaffolding!()` emits one such symbol per crate; the export
+/// table of a shipped cdylib therefore contains exactly one marker per crate
+/// whose FFI surface is actually reachable from the library. Used for both
+/// stale-list detection (CLI side) and per-component filtering (bindgen side).
+pub fn contract_version_marker(crate_name: &str) -> String {
+    format!("ffi_{crate_name}_uniffi_contract_version")
+}
+
+/// Return the subset of `manual` whose contract-version markers are missing
+/// from `exports`. An entry is "stale" iff the exported library does not carry
+/// that crate's UniFFI marker — meaning either the CLI invocation passed a
+/// crate that was never compiled in, or the cdylib was built without that
+/// crate's `setup_scaffolding!()` reaching the final binary.
+///
+/// The caller (typically `main.rs`) decides what to do with the returned list:
+/// fully stale (`stale.len() == manual.len()`) is a hard error, partially
+/// stale is a warning, empty is a no-op.
+pub fn check_stale(manual: &HashSet<String>, exports: &HashSet<String>) -> Vec<String> {
+    let mut stale: Vec<String> = manual
+        .iter()
+        .filter(|c| !exports.contains(&contract_version_marker(c)))
+        .cloned()
+        .collect();
+    stale.sort();
+    stale
+}
+
+/// Two-stage allowlist for emitted UniFFI components.
+///
+/// `allowed_crates` holds the manual `--crates` set; `None` means "no manual
+/// allowlist", `Some(set)` means "only these crates pass the manual filter".
+///
+/// `export_lookup` holds the export table of the shipped cdylib; `None` means
+/// "no export-table filter", `Some(set)` means "only crates whose
+/// `ffi_<crate>_uniffi_contract_version` marker is in the set pass the export
+/// filter".
+///
+/// A crate must pass *both* filters (when set) to be emitted. See module-level
+/// docs for rationale.
 pub struct KotlinBindingGenerator {
     pub allowed_crates: Option<HashSet<String>>,
+    pub export_lookup: Option<HashSet<String>>,
 }
 
 impl KotlinBindingGenerator {
-    pub fn new(allowed_crates: Option<HashSet<String>>) -> Self {
-        Self { allowed_crates }
+    pub fn new(
+        allowed_crates: Option<HashSet<String>>,
+        export_lookup: Option<HashSet<String>>,
+    ) -> Self {
+        Self {
+            allowed_crates,
+            export_lookup,
+        }
     }
 
     fn is_crate_allowed(&self, crate_name: &str) -> bool {
-        match &self.allowed_crates {
-            None => true,
-            Some(set) => set.contains(crate_name),
+        if let Some(exports) = &self.export_lookup {
+            if !exports.contains(&contract_version_marker(crate_name)) {
+                return false;
+            }
         }
+        if let Some(allowed) = &self.allowed_crates {
+            return allowed.contains(crate_name);
+        }
+        true
     }
 }
 
@@ -103,10 +174,19 @@ impl BindingGenerator for KotlinBindingGenerator {
         settings: &GenerationSettings,
         components: &[Component<Self::Config>],
     ) -> Result<()> {
-        for Component { ci, config, .. } in components {
-            if !self.is_crate_allowed(ci.crate_name()) {
-                continue;
-            }
+        let allowed_components: Vec<&Component<Self::Config>> = components
+            .iter()
+            .filter(|c| self.is_crate_allowed(c.ci.crate_name()))
+            .collect();
+
+        if allowed_components.is_empty() {
+            anyhow::bail!(
+                "no crates allowed by filter — empty intersection of metadata + --crates + --exported-lib (input had {} component(s))",
+                components.len()
+            );
+        }
+
+        for Component { ci, config, .. } in allowed_components.iter().copied() {
             let bindings = generate_bindings(config, ci)?;
 
             write_bindings_target(ci, settings, config, "common", bindings.common);
@@ -132,10 +212,6 @@ impl BindingGenerator for KotlinBindingGenerator {
             }
         }
 
-        let allowed_components: Vec<&Component<Self::Config>> = components
-            .iter()
-            .filter(|c| self.is_crate_allowed(c.ci.crate_name()))
-            .collect();
         write_wasm_callback_imports(&settings.out_dir, &allowed_components);
 
         Ok(())
@@ -323,41 +399,140 @@ fn write_cinterop(ci: &ComponentInterface, out_dir: &Utf8Path, content: String) 
 mod tests {
     use super::*;
 
+    fn s(items: &[&str]) -> HashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn markers(crates: &[&str]) -> HashSet<String> {
+        crates.iter().map(|c| contract_version_marker(c)).collect()
+    }
+
+    // ---------- Constructor / is_crate_allowed precedence matrix (12 cases) -----
+
     #[test]
-    fn allowlist_none_admits_all_crates() {
-        let g = KotlinBindingGenerator::new(None);
-        assert!(g.is_crate_allowed("rs_social_uniffi"));
-        assert!(g.is_crate_allowed("rs_social_core"));
-        assert!(g.is_crate_allowed(""));
+    fn matrix_1_no_filters_admits_anything() {
+        let g = KotlinBindingGenerator::new(None, None);
+        assert!(g.is_crate_allowed("any"));
     }
 
     #[test]
-    fn allowlist_some_admits_only_listed_crates() {
-        let allowed: HashSet<String> = ["rs_social_uniffi", "oidc_client_uniffi"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let g = KotlinBindingGenerator::new(Some(allowed));
-        assert!(g.is_crate_allowed("rs_social_uniffi"));
-        assert!(g.is_crate_allowed("oidc_client_uniffi"));
-        assert!(!g.is_crate_allowed("rs_social_core"));
-        assert!(!g.is_crate_allowed("rs_social_native"));
-        assert!(!g.is_crate_allowed(""));
+    fn matrix_2_export_only_admits_crate_with_marker() {
+        let g = KotlinBindingGenerator::new(None, Some(markers(&["a"])));
+        assert!(g.is_crate_allowed("a"));
     }
 
     #[test]
-    fn allowlist_empty_set_admits_nothing() {
-        let g = KotlinBindingGenerator::new(Some(HashSet::new()));
-        assert!(!g.is_crate_allowed("rs_social_uniffi"));
+    fn matrix_3_export_only_rejects_crate_without_marker() {
+        let g = KotlinBindingGenerator::new(None, Some(markers(&["a"])));
+        assert!(!g.is_crate_allowed("b"));
+    }
+
+    #[test]
+    fn matrix_4_export_only_empty_admits_nothing() {
+        let g = KotlinBindingGenerator::new(None, Some(HashSet::new()));
         assert!(!g.is_crate_allowed("anything"));
     }
 
     #[test]
-    fn allowlist_match_is_exact_not_substring() {
-        let allowed: HashSet<String> = ["rs_social"].iter().map(|s| s.to_string()).collect();
-        let g = KotlinBindingGenerator::new(Some(allowed));
-        assert!(g.is_crate_allowed("rs_social"));
-        assert!(!g.is_crate_allowed("rs_social_core"));
-        assert!(!g.is_crate_allowed("rs_social_uniffi"));
+    fn matrix_5_manual_only_admits_listed_crate() {
+        let g = KotlinBindingGenerator::new(Some(s(&["a"])), None);
+        assert!(g.is_crate_allowed("a"));
+    }
+
+    #[test]
+    fn matrix_6_manual_only_rejects_unlisted_crate() {
+        let g = KotlinBindingGenerator::new(Some(s(&["a"])), None);
+        assert!(!g.is_crate_allowed("b"));
+    }
+
+    #[test]
+    fn matrix_7_both_filters_agree_admit() {
+        let g = KotlinBindingGenerator::new(Some(s(&["a"])), Some(markers(&["a"])));
+        assert!(g.is_crate_allowed("a"));
+    }
+
+    #[test]
+    fn matrix_8_both_filters_agree_reject() {
+        let g = KotlinBindingGenerator::new(Some(s(&["a"])), Some(markers(&["a"])));
+        assert!(!g.is_crate_allowed("b"));
+    }
+
+    #[test]
+    fn matrix_9_export_lookup_can_veto_manual_listed_crate() {
+        // Manual allows "a" but exports only show marker for "b" — "a" rejected.
+        let g = KotlinBindingGenerator::new(Some(s(&["a"])), Some(markers(&["b"])));
+        assert!(!g.is_crate_allowed("a"));
+    }
+
+    #[test]
+    fn matrix_10_manual_can_veto_export_listed_crate() {
+        // Exports show marker for "b" but manual only allows "a" — "b" rejected.
+        let g = KotlinBindingGenerator::new(Some(s(&["a"])), Some(markers(&["b"])));
+        assert!(!g.is_crate_allowed("b"));
+    }
+
+    #[test]
+    fn matrix_11_manual_empty_admits_nothing() {
+        let g = KotlinBindingGenerator::new(Some(HashSet::new()), None);
+        assert!(!g.is_crate_allowed("any"));
+    }
+
+    #[test]
+    fn matrix_12_manual_empty_overrides_export_match() {
+        let g = KotlinBindingGenerator::new(Some(HashSet::new()), Some(markers(&["a"])));
+        assert!(!g.is_crate_allowed("a"));
+    }
+
+    // ---------- check_stale helper --------------------------------------------
+
+    #[test]
+    fn check_stale_all_missing_returns_full_set() {
+        let manual = s(&["a", "b"]);
+        let exports = markers(&["c"]);
+        let stale = check_stale(&manual, &exports);
+        assert_eq!(stale, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn check_stale_some_missing_returns_only_missing() {
+        let manual = s(&["a", "b", "c"]);
+        let exports = markers(&["a", "b"]);
+        let stale = check_stale(&manual, &exports);
+        assert_eq!(stale, vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn check_stale_none_missing_returns_empty() {
+        let manual = s(&["a", "b"]);
+        let exports = markers(&["a", "b"]);
+        let stale = check_stale(&manual, &exports);
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn check_stale_both_empty_returns_empty() {
+        let manual = HashSet::new();
+        let exports = HashSet::new();
+        let stale = check_stale(&manual, &exports);
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn check_stale_empty_manual_returns_empty() {
+        let manual = HashSet::new();
+        let exports = markers(&["a"]);
+        let stale = check_stale(&manual, &exports);
+        assert!(stale.is_empty());
+    }
+
+    // ---------- contract_version_marker formatter -----------------------------
+
+    #[test]
+    fn marker_format_matches_uniffi_setup_scaffolding() {
+        // uniffi_macros::setup_scaffolding emits this exact spelling.
+        assert_eq!(
+            contract_version_marker("rs_social_uniffi"),
+            "ffi_rs_social_uniffi_uniffi_contract_version"
+        );
     }
 }
