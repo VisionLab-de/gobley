@@ -1,0 +1,12 @@
+[package]
+name = "dummy_a"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+uniffi = { workspace = true }

@@ -1,0 +1,12 @@
+# Override the gobley repo's pin (1.83.0) for this fixture workspace only.
+# uniffi 0.29.5's transitive deps (indexmap 2.14, getrandom 0.4) require
+# Rust >= 1.85 (edition2024 stabilization).
+[toolchain]
+channel = "stable"
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-gnu",
+    "wasm32-unknown-unknown",
+]

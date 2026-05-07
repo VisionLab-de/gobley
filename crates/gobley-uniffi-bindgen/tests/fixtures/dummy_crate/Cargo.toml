@@ -1,0 +1,30 @@
+## Workspace for the gobley-uniffi-bindgen fixture binaries.
+##
+## Two leaf crates (`dummy_a`, `dummy_b`) each call `uniffi::setup_scaffolding!()`
+## so they emit distinct `ffi_<crate>_uniffi_contract_version` exports.
+## A third crate (`dummy_combined`) is a `cdylib` that links both leaves and
+## re-exports their scaffolding so the marker symbols survive into the final
+## shared library / wasm module. See `../README.md` and `../build.sh`.
+
+[workspace]
+resolver = "2"
+members = ["dummy_a", "dummy_b", "dummy_combined"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MPL-2.0"
+
+[workspace.dependencies]
+uniffi = { version = "=0.29.5", default-features = false }
+
+# Size optimisation. We strip debug info only — exported symbols
+# (the `ffi_dummy_*_uniffi_contract_version` markers) must survive.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+debug = false
