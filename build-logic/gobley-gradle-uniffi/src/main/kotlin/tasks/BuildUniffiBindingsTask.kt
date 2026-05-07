@@ -147,8 +147,16 @@ abstract class BuildUniffiBindingsTask : CargoPackageTask() {
                 arguments("--library")
             }
             val multiCrate = crateNames.getOrElse(emptyList())
-            if (multiCrate.isEmpty() && crateName.isPresent) {
-                arguments("--crate", crateName.get())
+            if (multiCrate.isEmpty()) {
+                if (crateName.isPresent) {
+                    arguments("--crate", crateName.get())
+                }
+            } else {
+                // Multi-crate library_mode: pass allowlist so transitive crates that
+                // emit UNIFFI metadata into the staticlib (but aren't exported by the
+                // cdylib) are skipped. Without this, bindgen generates Kotlin files
+                // that reference non-existent wasm exports → runtime `unreachable`.
+                arguments("--crates", multiCrate.joinToString(","))
             }
             if (formatCode.isPresent && formatCode.get()) {
                 arguments("--format")

@@ -210,10 +210,10 @@ class UniFfiPlugin : Plugin<Project> {
 
         val buildVariantForBindings = build.variant(variant)
         val cargoBuildTaskForBindings = buildVariantForBindings.buildTaskProvider
-        // Prefer SystemStaticLibrary (.a) for bindgen input: archives are
-        // pre-link, never linker-stripped, so UNIFFI_META metadata survives
-        // aggressive `strip = "symbols"` profiles. Fall back to the cdylib
-        // for crates that don't emit `staticlib` in `crate-type`.
+        // Prefer SystemStaticLibrary (.a) for bindgen input. Archives are pre-link,
+        // so UNIFFI_META survives aggressive `strip = "symbols"` profiles, and on
+        // wasm32 the .a contains transitive crate metadata that the cdylib .wasm
+        // sometimes drops. Fall back to cdylib if the crate doesn't emit staticlib.
         val bindingsOutputFile = cargoBuildTaskForBindings.flatMap { task ->
             task.libraryFileByCrateType.map {
                 it[CrateType.SystemStaticLibrary]
@@ -246,7 +246,15 @@ class UniFfiPlugin : Plugin<Project> {
             crateName.set(cargoExtension.cargoPackage.map { it.libraryCrateName })
             packageRoot.set(cargoExtension.cargoPackage.map { it.root.asFile.path })
             packageName.set(bindingsGeneration.packageName)
-            cdylibName.set(bindingsGeneration.cdylibName)
+            // Default cdylib_name to the cargo library crate name. uniffi's
+            // calc_cdylib_name returns None for `.a` and `.wasm` inputs, so the
+            // bindgen would otherwise fall back to `uniffi_<namespace>` which is
+            // not the actual cdylib package emitted by gobley-wasm-rust.
+            cdylibName.set(
+                bindingsGeneration.cdylibName.orElse(
+                    cargoExtension.cargoPackage.map { it.libraryCrateName }
+                )
+            )
             generateImmutableRecords.set(bindingsGeneration.generateImmutableRecords)
             omitChecksums.set(bindingsGeneration.omitChecksums)
             customTypes.set(bindingsGeneration.customTypes)

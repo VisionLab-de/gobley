@@ -4,7 +4,12 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-use std::{collections::HashMap, fs::File, io::Write, process::Command};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    io::Write,
+    process::Command,
+};
 
 use heck::ToLowerCamelCase;
 
@@ -16,7 +21,29 @@ use uniffi_bindgen::{BindingGenerator, Component, ComponentInterface, Generation
 mod gen_kotlin_multiplatform;
 use gen_kotlin_multiplatform::{generate_bindings, Config};
 
-pub struct KotlinBindingGenerator;
+/// Allowlist of crate names whose bindings should be emitted. When `None`, all
+/// components discovered by uniffi library_mode are written. When `Some`,
+/// components whose `crate_name` is not in the set are silently skipped — useful
+/// for multi-crate cdylibs where transitive `setup_scaffolding!()` invocations
+/// (e.g. shared core crates) leak UNIFFI metadata into the staticlib without
+/// being intended consumer-facing.
+pub struct KotlinBindingGenerator {
+    pub allowed_crates: Option<HashSet<String>>,
+}
+
+impl KotlinBindingGenerator {
+    pub fn new(allowed_crates: Option<HashSet<String>>) -> Self {
+        Self { allowed_crates }
+    }
+
+    fn is_crate_allowed(&self, crate_name: &str) -> bool {
+        match &self.allowed_crates {
+            None => true,
+            Some(set) => set.contains(crate_name),
+        }
+    }
+}
+
 impl BindingGenerator for KotlinBindingGenerator {
     type Config = Config;
 
@@ -29,13 +56,22 @@ impl BindingGenerator for KotlinBindingGenerator {
         settings: &GenerationSettings,
         components: &mut Vec<Component<Self::Config>>,
     ) -> Result<()> {
+        // For multi-crate library_mode, only the wrapper crate's config gets
+        // loaded via `--config`; transitive crate components have empty Configs.
+        // Propagate any pre-set cdylib_name (from the wrapper config or from
+        // calc_cdylib_name) to all components so they all reference the same
+        // wasm package emitted by gobley-wasm-rust. Without this, bindgen falls
+        // back to `uniffi_<namespace>` per crate, breaking wasmJs codegen.
+        let shared_cdylib_name: Option<String> = settings
+            .cdylib
+            .clone()
+            .or_else(|| components.iter().find_map(|c| c.config.cdylib_name.clone()));
         for c in &mut *components {
             c.config
                 .package_name
                 .get_or_insert_with(|| format!("uniffi.{}", c.ci.namespace()));
             c.config.cdylib_name.get_or_insert_with(|| {
-                settings
-                    .cdylib
+                shared_cdylib_name
                     .clone()
                     .unwrap_or_else(|| format!("uniffi_{}", c.ci.namespace()))
             });
@@ -66,6 +102,9 @@ impl BindingGenerator for KotlinBindingGenerator {
         components: &[Component<Self::Config>],
     ) -> Result<()> {
         for Component { ci, config, .. } in components {
+            if !self.is_crate_allowed(ci.crate_name()) {
+                continue;
+            }
             let bindings = generate_bindings(config, ci)?;
 
             write_bindings_target(ci, settings, config, "common", bindings.common);
@@ -91,7 +130,11 @@ impl BindingGenerator for KotlinBindingGenerator {
             }
         }
 
-        write_wasm_callback_imports(&settings.out_dir, components);
+        let allowed_components: Vec<&Component<Self::Config>> = components
+            .iter()
+            .filter(|c| self.is_crate_allowed(c.ci.crate_name()))
+            .collect();
+        write_wasm_callback_imports(&settings.out_dir, &allowed_components);
 
         Ok(())
     }
@@ -132,7 +175,7 @@ fn write_bindings_target(
     }
 }
 
-fn write_wasm_callback_imports(out_dir: &Utf8Path, components: &[Component<Config>]) {
+fn write_wasm_callback_imports(out_dir: &Utf8Path, components: &[&Component<Config>]) {
     let content = generate_wasm_callback_imports_content(components);
     if content.is_empty() {
         return;
@@ -164,10 +207,10 @@ fn ffi_type_to_wasm_params(ty: &uniffi_bindgen::interface::FfiType) -> Vec<&'sta
     }
 }
 
-fn generate_wasm_callback_imports_content(components: &[Component<Config>]) -> String {
+fn generate_wasm_callback_imports_content(components: &[&Component<Config>]) -> String {
     let mut lines = Vec::new();
 
-    for Component { ci, .. } in components {
+    for Component { ci, .. } in components.iter().copied() {
         let ns = ci.namespace();
 
         // Async continuation callback
@@ -272,4 +315,47 @@ fn write_cinterop(ci: &ComponentInterface, out_dir: &Utf8Path, content: String) 
     let file_path = dst_dir.join(format!("{}.h", ci.namespace()));
     let mut f = File::create(file_path).unwrap();
     write!(f, "{}", content).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_none_admits_all_crates() {
+        let g = KotlinBindingGenerator::new(None);
+        assert!(g.is_crate_allowed("rs_social_uniffi"));
+        assert!(g.is_crate_allowed("rs_social_core"));
+        assert!(g.is_crate_allowed(""));
+    }
+
+    #[test]
+    fn allowlist_some_admits_only_listed_crates() {
+        let allowed: HashSet<String> = ["rs_social_uniffi", "oidc_client_uniffi"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let g = KotlinBindingGenerator::new(Some(allowed));
+        assert!(g.is_crate_allowed("rs_social_uniffi"));
+        assert!(g.is_crate_allowed("oidc_client_uniffi"));
+        assert!(!g.is_crate_allowed("rs_social_core"));
+        assert!(!g.is_crate_allowed("rs_social_native"));
+        assert!(!g.is_crate_allowed(""));
+    }
+
+    #[test]
+    fn allowlist_empty_set_admits_nothing() {
+        let g = KotlinBindingGenerator::new(Some(HashSet::new()));
+        assert!(!g.is_crate_allowed("rs_social_uniffi"));
+        assert!(!g.is_crate_allowed("anything"));
+    }
+
+    #[test]
+    fn allowlist_match_is_exact_not_substring() {
+        let allowed: HashSet<String> = ["rs_social"].iter().map(|s| s.to_string()).collect();
+        let g = KotlinBindingGenerator::new(Some(allowed));
+        assert!(g.is_crate_allowed("rs_social"));
+        assert!(!g.is_crate_allowed("rs_social_core"));
+        assert!(!g.is_crate_allowed("rs_social_uniffi"));
+    }
 }

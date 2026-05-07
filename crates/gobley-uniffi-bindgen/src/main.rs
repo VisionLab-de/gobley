@@ -4,7 +4,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 
@@ -49,6 +49,14 @@ struct Cli {
     /// locate and parse Cargo.toml.
     #[clap(long = "crate")]
     crate_name: Option<String>,
+
+    /// Comma-separated allowlist of crate names whose bindings should be emitted.
+    /// Use with `--library` for multi-crate cdylibs that link in transitive crates
+    /// invoking `setup_scaffolding!()` (e.g. shared core libs) — those crates leak
+    /// UNIFFI metadata into the staticlib but are not exported by the cdylib, so
+    /// emitting bindings for them produces references to non-existent wasm exports.
+    #[clap(long = "crates", value_delimiter = ',')]
+    crates: Vec<String>,
 
     #[clap(long = "format", default_value_t = false)]
     try_format_code: bool,
@@ -118,11 +126,17 @@ fn main() -> anyhow::Result<()> {
         lib_file,
         library_mode,
         crate_name,
+        crates,
         source,
         try_format_code,
     } = Cli::parse();
 
-    let binding_generator = KotlinBindingGenerator;
+    let allowed_crates: Option<HashSet<String>> = if crates.is_empty() {
+        None
+    } else {
+        Some(crates.into_iter().collect())
+    };
+    let binding_generator = KotlinBindingGenerator::new(allowed_crates);
 
     if library_mode {
         if lib_file.is_some() {
