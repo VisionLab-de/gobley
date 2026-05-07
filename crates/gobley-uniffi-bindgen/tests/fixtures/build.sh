@@ -51,13 +51,25 @@ WASM_TOOLS="${WASM_TOOLS:-wasm-tools}"
 
 cd "${DUMMY_DIR}"
 
+TARGETS=()
+[[ $# -gt 0 ]] && TARGETS=("$@")
+
 want() {
     if [[ ${#TARGETS[@]} -eq 0 ]]; then return 0; fi
     for t in "${TARGETS[@]}"; do [[ "$t" == "$1" ]] && return 0; done
     return 1
 }
 
-TARGETS=("$@")
+VALID_TARGETS=(wasm dylib so dll)
+for t in "${TARGETS[@]:-}"; do
+    [[ -z "$t" ]] && continue
+    valid=0
+    for v in "${VALID_TARGETS[@]}"; do [[ "$t" == "$v" ]] && valid=1 && break; done
+    if [[ $valid -eq 0 ]]; then
+        echo "error: unknown target '$t'. valid: ${VALID_TARGETS[*]}" >&2
+        exit 1
+    fi
+done
 
 build_wasm() {
     echo "==> wasm"

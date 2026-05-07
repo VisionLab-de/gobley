@@ -12,7 +12,7 @@ markers to auto-derive the bindgen crate allowlist (replaces the manual
 | ------------ | ----------------- | -------------------------- | ----------------- |
 | `dummy.wasm` | WebAssembly       | `wasm32-unknown-unknown`   | any host          |
 | `dummy.dylib`| Mach-O dylib      | `aarch64-apple-darwin`     | macOS host        |
-| `dummy.so`   | ELF shared object | `x86_64-unknown-linux-gnu` | macOS via mingw / Linux host |
+| `dummy.so`   | ELF shared object | `x86_64-unknown-linux-gnu` | macOS via x86_64-unknown-linux-gnu cross-toolchain / Linux host |
 | `dummy.dll`  | PE32+ DLL         | `x86_64-pc-windows-gnu`    | macOS via mingw / Linux host |
 
 All four are produced from the same source — the `dummy_crate/` workspace —
