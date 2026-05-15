@@ -6,27 +6,31 @@
 
 package gobley.gradle.android
 
-import com.android.build.api.dsl.ApplicationBuildType
-import com.android.build.api.dsl.BuildType
-import com.android.build.api.dsl.LibraryBuildType
-import com.android.build.gradle.BaseExtension
-import com.android.build.gradle.internal.lint.AndroidLintAnalysisTask
-import com.android.build.gradle.internal.lint.LintModelWriterTask
-import com.android.build.gradle.internal.tasks.ExtractProguardFiles
-import com.android.build.gradle.internal.tasks.MergeConsumerProguardFilesTask
-import com.android.build.gradle.tasks.MergeSourceSetFolders
 import gobley.gradle.InternalGobleyGradleApi
-import gobley.gradle.Variant
-import gobley.gradle.getByVariant
-import gobley.gradle.variant
+import gobley.gradle.tasks.InjectJniLibsTask
 import org.gradle.api.Project
-import org.gradle.api.file.Directory
+import org.gradle.api.Task
+import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.RegularFile
 import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.TaskProvider
-import org.gradle.kotlin.dsl.getByType
-import org.gradle.kotlin.dsl.withType
 import java.io.File
+
+/**
+ * Callback type used by [GobleyAndroidExtensionDelegate.onVariants].
+ *
+ * Parameters:
+ *  - agpVariantName: the AGP variant name (e.g. "debug", "release")
+ *  - cargoVariantName: the Cargo variant name ("debug" or "release")
+ *  - onMainTask: registers the JNI inject task as a generated source dir for the main component
+ *  - onTestTask: registers the JNI inject task for the androidTest component (null when unavailable)
+ */
+typealias OnVariantAction = (
+    agpVariantName: String,
+    cargoVariantName: String,
+    onMainTask: (TaskProvider<InjectJniLibsTask>) -> Unit,
+    onTestTask: ((TaskProvider<InjectJniLibsTask>) -> Unit)?
+) -> Unit
 
 @InternalGobleyGradleApi
 interface GobleyAndroidExtensionDelegate {
@@ -36,133 +40,54 @@ interface GobleyAndroidExtensionDelegate {
     val androidNdkVersion: String?
     val abiFilters: Set<String>
 
-    fun addMainSourceDir(
-        variant: Variant? = null,
-        sourceDirectory: Provider<Directory>,
-    )
-
-    fun addMainJniDir(
+    /**
+     * Registers a generated source directory for Kotlin bindings using the AGP variant API.
+     * Used by UniFFI plugin to wire bindgen output into Android compilation.
+     */
+    fun <T : Task> addGeneratedBindingsDirectory(
         project: Project,
-        variant: Variant,
-        jniTask: TaskProvider<*>,
-        jniDirectory: Provider<Directory>,
+        taskProvider: TaskProvider<T>,
+        directoryMapping: (T) -> DirectoryProperty,
     )
 
+    /**
+     * Called once per AGP variant to wire [InjectJniLibsTask] outputs into the
+     * jniLibs source set for both the main and androidTest components.
+     */
+    fun onVariants(
+        project: Project,
+        action: OnVariantAction,
+    )
+
+    /**
+     * Adds proguard/keep-rules files for the given generation task.
+     */
+    fun addProguardFiles(
+        project: Project,
+        proguardFileProvider: Provider<RegularFile>,
+        generationTask: TaskProvider<*>,
+    )
+
+    /**
+     * Legacy overload retained for UniFFI plugin compatibility.
+     * Wraps the [RegularFile] in a plain provider and delegates to the primary overload.
+     */
     fun addProguardFiles(
         project: Project,
         proguardFile: RegularFile,
         generationTask: TaskProvider<*>,
-    )
-}
-
-@InternalGobleyGradleApi
-fun GobleyAndroidExtensionDelegate(project: Project): GobleyAndroidExtensionDelegate {
-    return GobleyAndroidExtensionDelegateImpl(project)
-}
-
-@OptIn(InternalGobleyGradleApi::class)
-private class GobleyAndroidExtensionDelegateImpl(project: Project) :
-    GobleyAndroidExtensionDelegate {
-    private val androidExtension: BaseExtension = project.extensions.getByType()
-
-    override val androidSdkRoot: File
-        get() = androidExtension.sdkDirectory
-
-    // TODO: Read <uses-sdk> from AndroidManifest.xml
-    // androidExtension.sourceSets.getByName("main").manifest.srcFile
-    override val androidMinSdk: Int
-        get() = androidExtension.defaultConfig.minSdk ?: 21
-    override val androidNdkRoot: File?
-        get() = androidExtension.ndkPath?.let(::File)
-    override val androidNdkVersion: String?
-        get() = androidExtension.ndkVersion.takeIf(String::isNotEmpty)
-    override val abiFilters: Set<String>
-        get() = androidExtension.defaultConfig.ndk.abiFilters
-
-    override fun addMainSourceDir(
-        variant: Variant?,
-        sourceDirectory: Provider<Directory>,
     ) {
-        androidExtension.sourceSets { sourceSets ->
-            val testSourceSet = if (variant != null) {
-                sourceSets.getByVariant(variant)
-            } else {
-                sourceSets.getByName("main")
-            }
-            testSourceSet.java.srcDir(sourceDirectory)
-        }
+        addProguardFiles(project, project.provider { proguardFile }, generationTask)
     }
 
-    override fun addMainJniDir(
-        project: Project,
-        variant: Variant,
-        jniTask: TaskProvider<*>,
-        jniDirectory: Provider<Directory>
-    ) {
-        project.tasks.withType<MergeSourceSetFolders> {
-            if (name.lowercase().contains("jni")) {
-                if (variant == this.variant!!) {
-                    inputs.dir(jniDirectory)
-                    dependsOn(jniTask)
-                }
-            }
-        }
-
-        androidExtension.sourceSets { sourceSets ->
-            val mainSourceSet = sourceSets.getByVariant(variant)
-            mainSourceSet.jniLibs.srcDir(jniDirectory)
-        }
-    }
-
-    override fun addProguardFiles(
-        project: Project,
-        proguardFile: RegularFile,
-        generationTask: TaskProvider<*>,
-    ) {
-        androidExtension.buildTypes.configureEach { buildType ->
-            addProguardFilesToBuildType(project, proguardFile, buildType, generationTask)
-        }
-    }
-
-    private fun addProguardFilesToBuildType(
-        project: Project,
-        proguardFile: RegularFile,
-        buildType: BuildType,
-        generationTask: TaskProvider<*>,
-    ) {
-        // For some reason, androidExtension.buildTypes.getByName returns a internal BuildType
-        // that implements both ApplicationBuildType and LibraryBuildType.
-
-        if (buildType is ApplicationBuildType) {
-            buildType.proguardFile(proguardFile)
-        }
-
-        // extractProguardFiles
-        project.tasks.withType<ExtractProguardFiles> {
-            dependsOn(generationTask)
-        }
-        // lintVitalAnalyze<variant>
-        project.tasks.withType<AndroidLintAnalysisTask> {
-            if (name.lowercase().contains(buildType.name.lowercase())) {
-                dependsOn(generationTask)
-            }
-        }
-
-        if (buildType is LibraryBuildType) {
-            buildType.consumerProguardFile(proguardFile)
-        }
-
-        // merge<variant>ConsumerProguardFiles
-        project.tasks.withType<MergeConsumerProguardFilesTask> {
-            if (name.lowercase().contains(buildType.name.lowercase())) {
-                dependsOn(generationTask)
-            }
-        }
-        // generate<variant>LintModel
-        project.tasks.withType<LintModelWriterTask> {
-            if (name.lowercase().contains(buildType.name.lowercase())) {
-                dependsOn(generationTask)
-            }
-        }
-    }
+    /**
+     * Adds a generated Kotlin source directory. Used by UniFFI plugin so Android Studio
+     * recognises the bindgen output in the Android source set.
+     *
+     * Default implementation is a no-op.
+     */
+    fun addMainSourceDir(
+        variant: gobley.gradle.Variant? = null,
+        sourceDirectory: Provider<org.gradle.api.file.Directory>,
+    ) = Unit
 }
