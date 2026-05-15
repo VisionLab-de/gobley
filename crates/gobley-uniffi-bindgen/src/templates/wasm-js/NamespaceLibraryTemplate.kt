@@ -135,7 +135,13 @@ internal object UniffiLib {
 // globalThis.__gobleyRustExports before any FFI call.
 // Idempotent — second call is a no-op if already initialized.
 
-@JsFun("(b64, helperUrl) => { if (globalThis.__gobleyRustExports) return Promise.resolve(); if (typeof wasmExports !== 'undefined' && !globalThis.__gobleyKotlinExports) { globalThis.__gobleyKotlinExports = wasmExports; } const bin = atob(b64); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return import(/* webpackIgnore: true */ helperUrl).then(m => m.init(u8.buffer, { kotlinExports: globalThis.__gobleyKotlinExports })); }")
+// Dynamic import is built via Function constructor so webpack's static parser
+// cannot see the `import(...)` token and therefore cannot raise the
+// "Critical dependency: the request of a dependency is an expression" warning
+// for the runtime-built helper data: URL. Requires `'unsafe-eval'` in any
+// host CSP — same requirement that Kotlin/Wasm and Compose runtime already
+// impose, so no net loss of CSP posture.
+@JsFun("(b64, helperUrl) => { if (globalThis.__gobleyRustExports) return Promise.resolve(); if (typeof wasmExports !== 'undefined' && !globalThis.__gobleyKotlinExports) { globalThis.__gobleyKotlinExports = wasmExports; } const bin = atob(b64); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); const dynImport = globalThis.__gobleyDynImport || (globalThis.__gobleyDynImport = new Function('u', 'return import(u);')); return dynImport(helperUrl).then(m => m.init(u8.buffer, { kotlinExports: globalThis.__gobleyKotlinExports })); }")
 internal external fun __gobley_init_rust_wasm(base64: String, helperUrl: String): kotlin.js.JsAny
 
 {{ visibility() }}suspend fun uniffiEnsureInitializedAsync() {
