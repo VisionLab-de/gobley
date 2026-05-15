@@ -25,6 +25,7 @@ dependencies {
     compileOnly(plugin(libs.plugins.kotlin.multiplatform))
     compileOnly(plugin(libs.plugins.android.application))
     compileOnly(plugin(libs.plugins.android.library))
+    compileOnly(plugin(libs.plugins.android.kotlin.multiplatform.library))
 
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.semver)
