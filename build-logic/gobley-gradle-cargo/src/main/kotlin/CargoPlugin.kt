@@ -34,6 +34,8 @@ import gobley.gradle.cargo.tasks.RustUpTargetAddTask
 import gobley.gradle.cargo.tasks.RustUpTask
 import gobley.gradle.cargo.utils.register
 import gobley.gradle.kotlin.GobleyKotlinExtensionDelegate
+import gobley.gradle.kotlin.gobleyPlatformType
+import gobley.gradle.kotlin.isGobleyAndroidTarget
 import gobley.gradle.rust.CrateType
 import gobley.gradle.rust.targets.RustAndroidTarget
 import gobley.gradle.rust.targets.RustJvmTarget
@@ -65,13 +67,13 @@ import org.gradle.process.CommandLineArgumentProvider
 import kotlin.reflect.full.superclasses
 import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 import org.jetbrains.kotlin.gradle.plugin.KotlinTarget
-import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinAndroidTarget
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinWithJavaTarget
 import org.jetbrains.kotlin.gradle.targets.js.KotlinWasmTargetType
 import org.jetbrains.kotlin.gradle.targets.js.ir.KotlinJsIrTarget
 import org.jetbrains.kotlin.gradle.targets.jvm.KotlinJvmTarget
 
+@OptIn(InternalGobleyGradleApi::class)
 class CargoPlugin : Plugin<Project> {
     companion object {
         internal const val TASK_GROUP = "cargo"
@@ -296,7 +298,7 @@ class CargoPlugin : Plugin<Project> {
     }
 
     private fun KotlinTarget.requiredRustTargets(): List<RustTarget> {
-        return when (platformType) {
+        return when (gobleyPlatformType) {
             KotlinPlatformType.jvm -> {
                 GobleyHost.current.platform.supportedTargets.filterIsInstance<RustJvmTarget>()
             }
@@ -332,7 +334,7 @@ class CargoPlugin : Plugin<Project> {
         // here that WASM targets were unsupported; that warning is now stale.
 
         val hasAndroidJvmTargets = kotlinExtensionDelegate?.targets.orEmpty().any {
-            it.platformType == KotlinPlatformType.androidJvm
+            it.isGobleyAndroidTarget
         }
         if (hasAndroidJvmTargets && androidDelegate == null) {
             throw GradleException("Android JVM targets are added, but Android Gradle Plugin is not found.")
@@ -343,7 +345,7 @@ class CargoPlugin : Plugin<Project> {
         val requiredCrateTypes = cargoExtension
             .builds
             .flatMap { it.kotlinTargets }
-            .map { it.platformType.requiredCrateType() }
+            .map { it.gobleyPlatformType.requiredCrateType() }
             .distinct()
         val actualCrateTypes = cargoExtension.cargoPackage.get().libraryCrateTypes
         if (!actualCrateTypes.containsAll(requiredCrateTypes)) {
@@ -368,11 +370,12 @@ class CargoPlugin : Plugin<Project> {
 
     private fun Project.configureBuildTasks() {
         val androidTarget = cargoExtension.builds.firstNotNullOfOrNull { build ->
-            build.kotlinTargets.firstNotNullOfOrNull { it as? KotlinAndroidTarget }
+            build.kotlinTargets.firstOrNull { it.isGobleyAndroidTarget }
         }
         val jvmTarget = cargoExtension.builds.firstNotNullOfOrNull { build ->
             build.kotlinTargets.firstOrNull {
-                it is KotlinJvmTarget || it is KotlinWithJavaTarget<*, *>
+                (it is KotlinJvmTarget || it is KotlinWithJavaTarget<*, *>)
+                        && !it.isGobleyAndroidTarget
             }
         }
         val wasmTransformerEnabled = cargoExtension.wasmTransformerEnabled
@@ -436,7 +439,7 @@ class CargoPlugin : Plugin<Project> {
                 }
             }
             for (kotlinTarget in cargoBuild.kotlinTargets) {
-                when (kotlinTarget.platformType) {
+                when (kotlinTarget.gobleyPlatformType) {
                     KotlinPlatformType.jvm -> {
                         cargoBuild as CargoJvmBuild<*>
                         cargoBuild.variants {
@@ -488,7 +491,7 @@ class CargoPlugin : Plugin<Project> {
     }
 
     private fun Project.configureJvmPostBuildTasks(
-        // kotlinTarget can be KotlinAndroidTarget when the JVM target is not present. This is for
+        // kotlinTarget can be a KMP Android target when the JVM target is not present. This is for
         // Android local unit tests.
         kotlinTarget: KotlinTarget,
         cargoBuildVariant: CargoJvmBuildVariant<*>,
@@ -537,7 +540,7 @@ class CargoPlugin : Plugin<Project> {
 
         @OptIn(InternalGobleyGradleApi::class)
         if (
-            kotlinTarget !is KotlinAndroidTarget
+            !kotlinTarget.isGobleyAndroidTarget
             && cargoBuildVariant.embedRustLibrary.get()
             && cargoBuildVariant.variant == cargoBuildVariant.build.jvmVariant.get()
         ) {
@@ -566,7 +569,7 @@ class CargoPlugin : Plugin<Project> {
 
         @OptIn(InternalGobleyGradleApi::class)
         if (
-            kotlinTarget !is KotlinAndroidTarget
+            !kotlinTarget.isGobleyAndroidTarget
             && cargoBuildVariant.embedRustLibrary.get()
             && cargoBuildVariant.variant == cargoBuildVariant.build.jvmPublishingVariant.get()
             && cargoExtension.publishJvmArtifacts.get()

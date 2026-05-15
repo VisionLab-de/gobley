@@ -18,7 +18,6 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
 import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSet
 import org.jetbrains.kotlin.gradle.plugin.KotlinTarget
-import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinAndroidTarget
 import org.jetbrains.kotlin.gradle.targets.js.KotlinWasmTargetType
 import org.jetbrains.kotlin.gradle.targets.js.ir.KotlinJsIrTarget
 import org.jetbrains.kotlin.gradle.targets.jvm.KotlinJvmTarget
@@ -48,7 +47,7 @@ class GobleyKotlinMultiplatformExtensionDelegate(
         get() = targets.firstOrNull { it is KotlinJvmTarget }
 
     override val androidTarget: KotlinTarget?
-        get() = targets.firstOrNull { it is KotlinAndroidTarget }
+        get() = targets.firstOrNull { it.isGobleyAndroidTarget }
 }
 
 @OptIn(InternalGobleyGradleApi::class)
@@ -63,28 +62,28 @@ private fun GobleyKotlinSourceSetCollection(
             get() = sourceSets.getByName("commonMain")
 
         private fun androidTarget(): KotlinTarget {
-            return targets.firstOrNull { it.platformType == KotlinPlatformType.androidJvm } ?: error("Android target not present")
+            return targets.firstOrNull { it.isGobleyAndroidTarget } ?: error("Android target not present")
         }
 
         override fun androidMain(variant: Variant?): KotlinSourceSet {
-            val androidTarget = androidTarget()
-            return sourceSets.maybeCreate(
+            return sourceSets.findAndroidSourceSet(
                 when (variant) {
-                    Variant.Debug -> "${androidTarget.name}Debug"
-                    Variant.Release -> "${androidTarget.name}Release"
-                    null -> "androidMain"
-                }
+                    Variant.Debug -> listOf("androidDebug", "androidMain")
+                    Variant.Release -> listOf("androidRelease", "androidMain")
+                    null -> listOf("androidMain")
+                },
+                fallbackName = "androidMain",
             )
         }
 
         override fun androidUnitTest(variant: Variant?): KotlinSourceSet {
-            val androidTarget = androidTarget()
-            return sourceSets.maybeCreate(
+            return sourceSets.findAndroidSourceSet(
                 when (variant) {
-                    Variant.Debug -> "${androidTarget.name}UnitTestDebug"
-                    Variant.Release -> "${androidTarget.name}UnitTestRelease"
-                    null -> "${androidTarget.name}UnitTest"
-                }
+                    Variant.Debug -> listOf("androidUnitTestDebug", "androidUnitTest", "androidTestOnJvm")
+                    Variant.Release -> listOf("androidUnitTestRelease", "androidUnitTest", "androidTestOnJvm")
+                    null -> listOf("androidUnitTest", "androidTestOnJvm")
+                },
+                fallbackName = "androidTestOnJvm",
             )
         }
 
@@ -132,4 +131,14 @@ private fun GobleyKotlinSourceSetCollection(
                 wasmTarget(KotlinWasmTargetType.WASI)
             }
     }
+}
+
+private fun NamedDomainObjectContainer<KotlinSourceSet>.findAndroidSourceSet(
+    names: List<String>,
+    fallbackName: String,
+): KotlinSourceSet {
+    for (name in names) {
+        findByName(name)?.let { return it }
+    }
+    return maybeCreate(fallbackName)
 }
