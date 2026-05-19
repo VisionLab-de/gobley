@@ -591,7 +591,8 @@ class CargoPlugin : Plugin<Project> {
         }
 
         @OptIn(InternalGobleyGradleApi::class)
-        if (androidTarget != null && cargoBuildVariant.androidUnitTest.get()) {
+        if (androidTarget != null && cargoBuildVariant.androidUnitTest.get()
+            && !DependencyUtils.isAndroidUnitTestSkipped(project)) {
             DependencyUtils.addAndroidUnitTestRuntimeRustLibraryJar(
                 this,
                 cargoBuildVariant.rustTarget,
