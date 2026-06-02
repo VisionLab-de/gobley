@@ -301,8 +301,9 @@ internal object {{ trait_impl }} {
 //
 // `@JsExport` requires public visibility and currently rejects
 // `internal` value-class parameter types on Kotlin/Wasm. The wrappers
-// receive raw `Int`/`Long` for FFI pointers and call-status, then wrap
-// them into the value-class types the internal dispatcher expects.
+// receive raw `Int`/`Long` for FFI pointers, call-status, and async
+// foreign-future-complete callback table indices, then wrap them into
+// the value-class types the internal dispatcher expects.
 //
 // Argument names use `var_name_raw` (no Kotlin backticks) here because
 // `@JsExport` parameter identifiers are exposed to the JS host and
@@ -329,6 +330,15 @@ public fun gobley_callback_{{ name }}_{{ meth.name()|var_name_raw }}(
     {{ arg.name()|var_name_raw }}Ptr: Pointer,
     {%- when FfiType::VoidPointer %}
     {{ arg.name()|var_name_raw }}Ptr: Pointer,
+    {%- when FfiType::Callback(_) %}
+    // Async foreign-future-complete callback. Rust passes it across the
+    // FFI as an i32 `__indirect_function_table` index (per the T0.C.1
+    // spike). The Kotlin-typed `{{ arg.type_().borrow()|ffi_type_name_by_value(ci) }}` value-class
+    // alias is `internal`, and Kotlin/Wasm forbids an `internal` type in a
+    // `@JsExport public` signature — so the exported parameter is the raw
+    // `Int` index, rehydrated to the typed value inside the body (same
+    // opaque-identity round-trip as the struct-field callback getters).
+    {{ arg.name()|var_name_raw }}Index: Int,
     {%- else %}
     {{ arg.name()|var_name_raw }}: {{ arg.type_().borrow()|ffi_type_name_by_value(ci) }},
     {%- endmatch %}
@@ -385,6 +395,22 @@ public fun gobley_callback_{{ name }}_{{ meth.name()|var_name_raw }}(
         {{ arg.name()|var_name_raw }}Ptr,
         {%- when FfiType::VoidPointer %}
         {{ arg.name()|var_name_raw }}Ptr,
+        {%- when FfiType::Callback(_) %}
+        // Rehydrate the i32 `__indirect_function_table` index into the
+        // `internal` `{{ arg.type_().borrow()|ffi_type_name_by_value(ci) }}` value the dispatcher expects.
+        // `uniffiRememberOpaqueCallback` records the (lambda, index) pair so
+        // the matching setter can recover the index — the lambda itself is an
+        // identity pass-through and is never invoked from Kotlin (same model
+        // as the struct-field callback getters in `wasm_layout`). The explicit
+        // type argument lets Kotlin infer the lambda's parameter types.
+        uniffiRememberOpaqueCallback<{{ arg.type_().borrow()|ffi_type_name_by_value(ci) }}>(
+            { _, _ ->
+                throw InternalException(
+                    "Opaque callback {{ name }}.{{ meth.name() }} cannot be invoked from Kotlin"
+                )
+            },
+            {{ arg.name()|var_name_raw }}Index,
+        ),
         {%- else %}
         {{ arg.name()|var_name_raw }},
         {%- endmatch %}
