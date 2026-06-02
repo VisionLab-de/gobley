@@ -1040,6 +1040,30 @@ mod wasm_layout {
         offsets
     }
 
+    /// Total size in bytes of FfiStruct `s` per wasm32 `#[repr(C)]`: the last
+    /// field's offset + its size, rounded up to the struct's alignment (the max
+    /// field alignment; 8 on wasm32 for the structs we emit). Empty struct -> 0.
+    /// Used to size the `withWasmStackFrame` slab the async-callback completer
+    /// writes the sret foreign-future result struct into. (Distinct fn rather
+    /// than extending `size_of`, which takes a bare `&FfiType` and cannot resolve
+    /// a `FfiType::Struct(name)` to its `FfiStruct` without a `ComponentInterface`.)
+    pub(super) fn struct_size(s: &FfiStruct) -> usize {
+        let offsets = field_offsets(s);
+        let fields = s.fields();
+        match fields.last() {
+            None => 0,
+            Some(last) => {
+                let last_end = offsets[offsets.len() - 1] + size_of(&last.type_());
+                let struct_align = fields
+                    .iter()
+                    .map(|f| align_of(&f.type_()))
+                    .max()
+                    .unwrap_or(1);
+                align_up(last_end, struct_align)
+            }
+        }
+    }
+
     /// Find the offset of `field` inside `parent`. Linear scan — FFI structs
     /// have a handful of fields, so the cost is negligible at codegen time.
     /// Returns `None` if `field` is not a field of `parent` (caller bug).
@@ -1179,6 +1203,7 @@ mod wasm_layout {
         ffi_struct: &FfiStruct,
         base: &str,
         offset: usize,
+        ci: &ComponentInterface,
     ) -> Result<String, Error> {
         match field.type_() {
             FfiType::Int8 | FfiType::UInt8 => {
@@ -1205,11 +1230,39 @@ mod wasm_layout {
             // Kotlin lambda back up in `uniffiOpaqueCallbackIndices` —
             // any lambda the caller did not originally receive from Rust
             // has no known index and trips `InternalException`.
-            FfiType::Callback(_) => Ok(format!(
-                r#"WasmMemoryView.setInt({base} + {offset}, if (value == null) 0 else uniffiOpaqueCallbackIndex(value) ?: throw InternalException("Unsupported callback instance for {}.{}: $value"))"#,
-                ffi_struct.name(),
-                field.name(),
-            )),
+            // The foreign-future-free callback is Kotlin-origin
+            // (`uniffiForeignFutureFreeImpl`, built on the Kotlin side and handed
+            // TO Rust — never rehydrated from a Rust-supplied index), so it is
+            // never present in `uniffiOpaqueCallbackIndices` and the generic
+            // lookup below throws. Resolve its funcref index by identity via the
+            // dedicated resolver instead (mirrors the `RustFutureContinuationCallback`
+            // arg arm in `render_function_arg_lowering`). All other struct-field
+            // callbacks keep the opaque-identity lookup.
+            // Gated on `has_async_callback_interface_definition`: the
+            // `uniffiIndexForForeignFutureFreeCallback` resolver (and the
+            // `uniffiForeignFutureFreeImpl` it maps) is only emitted for
+            // crates that define an async callback interface (Helpers.kt /
+            // Async.kt carry the same gate). The `UniffiForeignFuture` FFI
+            // struct is a standard uniffi ABI type emitted in EVERY binding,
+            // so its `free` field setter is rendered even in async-callback-
+            // free crates (e.g. oidc_client_uniffi) — but there the Kotlin
+            // side never constructs a foreign future, so the setter is dead
+            // code that only needs to compile. Fall through to the generic
+            // opaque-identity path in that case (the original behaviour).
+            FfiType::Callback(callback_name) => match callback_name.as_str() {
+                "ForeignFutureFree" | "UniffiForeignFutureFree"
+                    if ci.has_async_callback_interface_definition() =>
+                {
+                    Ok(format!(
+                        "WasmMemoryView.setInt({base} + {offset}, uniffiIndexForForeignFutureFreeCallback(value))"
+                    ))
+                }
+                _ => Ok(format!(
+                    r#"WasmMemoryView.setInt({base} + {offset}, if (value == null) 0 else uniffiOpaqueCallbackIndex(value) ?: throw InternalException("Unsupported callback instance for {}.{}: $value"))"#,
+                    ffi_struct.name(),
+                    field.name(),
+                )),
+            },
             FfiType::Reference(_) | FfiType::MutReference(_) | FfiType::VoidPointer => {
                 Ok(format!("WasmMemoryView.setInt({base} + {offset}, value)"))
             }
@@ -2191,9 +2244,17 @@ mod filters {
     pub fn wasm_field_setter(
         field: &FfiField,
         ffi_struct: &FfiStruct,
+        ci: &ComponentInterface,
     ) -> Result<String, askama::Error> {
         let offset = wasm_field_offset(field, ffi_struct)?;
-        wasm_layout::render_field_setter(field, ffi_struct, "ptr", offset)
+        wasm_layout::render_field_setter(field, ffi_struct, "ptr", offset, ci)
+    }
+
+    /// Wasm32 total byte size of `ffi_struct` (`#[repr(C)]`). Sizes the
+    /// `withWasmStackFrame` slab the async-callback completer writes the
+    /// foreign-future result struct into before invoking the Rust completer.
+    pub fn wasm_struct_size(ffi_struct: FfiStruct) -> Result<usize, askama::Error> {
+        Ok(wasm_layout::struct_size(&ffi_struct))
     }
 
     pub fn wasm_js_import_decl(

@@ -43,7 +43,7 @@ internal value class {{ ffi_struct.name()|ffi_struct_name }}(internal val ptr: P
 internal var {{ ffi_struct.name()|ffi_struct_name }}.{{ field.name()|var_name }}: {{ field.type_().borrow()|ffi_type_name_for_ffi_struct(ci) }}
     get() = {{ field|wasm_field_getter(ffi_struct, ci) }}
     set(value) {
-        {{ field|wasm_field_setter(ffi_struct) }}
+        {{ field|wasm_field_setter(ffi_struct, ci) }}
     }
 {%- endfor %}
 

@@ -111,6 +111,20 @@ internal val UNIFFI_FOREIGN_FUTURE_FREE_INDEX: Int by lazy {
     __gobley_foreign_future_free_index()
 }
 
+// Invoke a Rust-supplied foreign-future COMPLETE funcref by its
+// `__indirect_function_table` index — the Kotlin → Rust reverse of the
+// async-callback round-trip. The funcref's wasm signature is
+// `(callbackData: i64, resultStructPtr: i32) -> ()`; `callbackData` is
+// reassembled from its two i32 halves because Kotlin/Wasm cannot pass an i64
+// across a `@JsFun` boundary directly (same lo/hi split as the i64 arg lowering).
+@JsFun("(idx, callbackDataLow, callbackDataHigh, resultStructPtr) => { const fn = globalThis.__gobleyIndirectFunctionTable.get(idx); fn(BigInt.asIntN(64, (BigInt(callbackDataHigh >>> 0) << 32n) | BigInt(callbackDataLow >>> 0)), resultStructPtr); }")
+internal external fun gobleyInvokeForeignFutureComplete(
+    idx: Int,
+    callbackDataLow: Int,
+    callbackDataHigh: Int,
+    resultStructPtr: Pointer,
+)
+
 internal fun uniffiForeignFutureFreeCallbackForIndex(
     index: Int,
 ): UniffiForeignFutureFree? {

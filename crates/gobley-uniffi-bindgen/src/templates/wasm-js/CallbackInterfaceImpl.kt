@@ -404,10 +404,24 @@ public fun gobley_callback_{{ name }}_{{ meth.name()|var_name_raw }}(
         // as the struct-field callback getters in `wasm_layout`). The explicit
         // type argument lets Kotlin infer the lambda's parameter types.
         uniffiRememberOpaqueCallback<{{ arg.type_().borrow()|ffi_type_name_by_value(ci) }}>(
-            { _, _ ->
-                throw InternalException(
-                    "Opaque callback {{ name }}.{{ meth.name() }} cannot be invoked from Kotlin"
-                )
+            // Real foreign-future completer (Kotlin → Rust): write the result
+            // struct into a Rust-stack slab, then `call_indirect` the Rust
+            // completer funcref (by its cached table index) with the i64
+            // callbackData + the slab pointer. Rust's `foreign_future_complete`
+            // moves the struct into the oneshot synchronously before returning,
+            // so the auto-freed stack frame is safe.
+            { uniffiCbData, uniffiResult ->
+                val uniffiResultSize = {{ meth.foreign_future_ffi_result_struct()|wasm_struct_size }}
+                withWasmStackFrame(uniffiResultSize) { uniffiResultPtr ->
+                    zeroWasmMemory(uniffiResultPtr, uniffiResultSize)
+                    {{ meth.foreign_future_ffi_result_struct().name()|ffi_struct_name }}(uniffiResultPtr).uniffiSetValue(uniffiResult)
+                    gobleyInvokeForeignFutureComplete(
+                        {{ arg.name()|var_name_raw }}Index,
+                        gobleyLongLow(uniffiCbData),
+                        gobleyLongHigh(uniffiCbData),
+                        uniffiResultPtr,
+                    )
+                }
             },
             {{ arg.name()|var_name_raw }}Index,
         ),
