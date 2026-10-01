@@ -48,6 +48,15 @@ members = [
 ]
 resolver = "2"
 
+# Line tables keep file:line in backtraces for our crates; dependencies carry no
+# debuginfo. Measured (SQ-575, SQ-578): docs/build-performance.md.
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 # Used in tests/gradle/cargo-only
 [profile.my-opt-level-2-profile]
 inherits = "dev"
