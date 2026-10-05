@@ -27,7 +27,7 @@ class GobleyKotlinJvmExtensionDelegate(
     override val pluginId = PluginIds.KOTLIN_JVM
 
     override val targets: DomainObjectCollection<KotlinTarget> =
-        project.container(KotlinTarget::class.java)
+        project.objects.domainObjectSet(KotlinTarget::class.java)
 
     override val sourceSets: GobleyKotlinSourceSetCollection
         get() = GobleyKotlinSourceSetCollection(kotlinJvmExtension.sourceSets)
