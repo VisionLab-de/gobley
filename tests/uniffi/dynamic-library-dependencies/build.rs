@@ -19,7 +19,7 @@ fn main() {
     // On Windows, when the path gets too long, the linker fails to open files to write the results.
     // Select a temporary directory to prevent this.
     #[cfg(all(target_os = "windows", target_env = "msvc"))]
-    let target_dir = tempdir::TempDir::new("gobley").unwrap().into_path();
+    let target_dir = tempfile::Builder::new().prefix("gobley").tempdir().unwrap().into_path();
 
     // On other systems, just store the build results inside the build script output directory.
     #[cfg(not(all(target_os = "windows", target_env = "msvc")))]
