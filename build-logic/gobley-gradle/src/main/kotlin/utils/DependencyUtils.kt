@@ -47,7 +47,7 @@ object DependencyUtils {
         configureEachCommonProjectDependencies(currentProject.configurations) { dependency ->
             currentProject.dependencies.add(
                 configurationName,
-                currentProject.project(dependency.versionCompatiblePath),
+                currentProject.dependencies.project(mapOf("path" to dependency.versionCompatiblePath)),
             )
         }
     }

@@ -9,6 +9,7 @@ package gobley.gradle.utils
 import gobley.gradle.GobleyHost
 import gobley.gradle.InternalGobleyGradleApi
 import org.gradle.api.DefaultTask
+import org.gradle.api.GradleException
 import org.gradle.api.Project
 import org.gradle.api.file.Directory
 import org.gradle.api.file.DirectoryProperty
@@ -24,7 +25,6 @@ import org.gradle.api.provider.ProviderFactory
 import org.gradle.api.provider.ValueSource
 import org.gradle.api.provider.ValueSourceParameters
 import org.gradle.process.ExecOperations
-import org.gradle.process.internal.ExecException
 import java.io.ByteArrayOutputStream
 import java.io.File
 import javax.inject.Inject
@@ -275,9 +275,9 @@ data class CommandResult(
             }.toString()
             if (logger != null) {
                 logger.error(message)
-                throw ExecException(commandFailedMessage)
+                throw GradleException(commandFailedMessage)
             }
-            throw ExecException(commandFailedMessage + message)
+            throw GradleException(commandFailedMessage + message)
         }
     }
 }
