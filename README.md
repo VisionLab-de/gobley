@@ -13,7 +13,7 @@ using [UniFFI](https://github.com/mozilla/uniffi-rs). This project was forked
 from [UniFFI Kotlin Multiplatform bindings](https://gitlab.com/trixnity/uniffi-kotlin-multiplatform-bindings).
 Since the original project is no longer maintained, active development now continues here.
 
-Currently, Android, Kotlin/JVM, and Kotlin/Native are supported. WASM is not supported yet.
+Currently, Android, Kotlin/JVM, and Kotlin/Native are supported. WASM support lives on this fork's `wasm` branch (the branch tracked by the rival-platform subtree); the upstream README statement "WASM is not supported yet" does not apply here.
 
 ## Features
 
