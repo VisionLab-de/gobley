@@ -141,7 +141,15 @@ internal object UniffiLib {
 // for the runtime-built helper data: URL. Requires `'unsafe-eval'` in any
 // host CSP — same requirement that Kotlin/Wasm and Compose runtime already
 // impose, so no net loss of CSP posture.
-@JsFun("(b64, helperUrl) => { if (globalThis.__gobleyRustExports) return Promise.resolve(); if (typeof wasmExports !== 'undefined' && !globalThis.__gobleyKotlinExports) { globalThis.__gobleyKotlinExports = wasmExports; } const bin = atob(b64); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); const dynImport = globalThis.__gobleyDynImport || (globalThis.__gobleyDynImport = new Function('u', 'return import(u);')); return dynImport(helperUrl).then(m => m.init(u8.buffer, { kotlinExports: globalThis.__gobleyKotlinExports })); }")
+//
+// Host contract (Kotlin/Wasm 2.4+, https://kotl.in/vr3szr): the `wasmExports`
+// global no longer exposes @JsExport functions; they are only named exports of
+// the app's entry ES module. The host page must load the bundle as
+// `<script type="module">` and set globalThis.__gobleyKotlinExports to that
+// module's exports, or to a Promise of them (e.g. the webpack library value
+// globalThis.composeApp). Init awaits it, then the helpers shim replaces it with
+// the resolved callback object that CallbackInterfaceImpl and Helpers read.
+@JsFun("(b64, helperUrl) => { if (globalThis.__gobleyRustExports) return Promise.resolve(); const bin = atob(b64); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); const dynImport = globalThis.__gobleyDynImport || (globalThis.__gobleyDynImport = new Function('u', 'return import(u);')); return Promise.resolve(globalThis.__gobleyKotlinExports).then(k => { if (k == null) throw new Error('gobley wasm init: globalThis.__gobleyKotlinExports is not set. Kotlin/Wasm 2.4 no longer exposes @JsExport functions via wasmExports (https://kotl.in/vr3szr); load the bundle as a module script and set globalThis.__gobleyKotlinExports to the entry module exports or a Promise of them.'); return dynImport(helperUrl).then(m => m.init(u8.buffer, { kotlinExports: k })); }); }")
 internal external fun __gobley_init_rust_wasm(base64: String, helperUrl: String): kotlin.js.JsAny
 
 {{ visibility() }}suspend fun uniffiEnsureInitializedAsync() {
