@@ -12,11 +12,16 @@ import gobley.gradle.cargo.dsl.CargoBinaryCrateSource
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.Property
+import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.CacheableTask
 import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.InputFiles
 import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.kotlin.dsl.property
+import java.io.File
 
 @CacheableTask
 abstract class CargoInstallTask : CargoTask() {
@@ -25,6 +30,21 @@ abstract class CargoInstallTask : CargoTask() {
 
     @get:Input
     abstract val binaryCrateSource: Property<CargoBinaryCrateSource>
+
+    /**
+     * Every file of a [CargoBinaryCrateSource.Path] crate, so editing it re-runs `cargo install`.
+     * Not only `.rs`: the bindgen embeds its askama templates at compile time (SQ-2408).
+     */
+    @Suppress("LeakingThis", "unused")
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    internal val pathSourceFiles: Provider<List<File>> = binaryCrateSource.map { source ->
+        if (source !is CargoBinaryCrateSource.Path) return@map emptyList()
+        File(source.path).walk()
+            .onEnter { it.name !in arrayOf("target", "build", ".gradle", ".idea") }
+            .filter { it.isFile }
+            .toList()
+    }
 
     @get:OutputDirectory
     abstract val installDirectory: DirectoryProperty
