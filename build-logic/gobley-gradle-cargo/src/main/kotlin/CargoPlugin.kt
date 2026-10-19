@@ -155,7 +155,10 @@ class CargoPlugin : Plugin<Project> {
         }
         PluginUtils.withAndroidPlugin(this) { delegate ->
             androidDelegate = delegate
-            val abiFilters = androidDelegate?.abiFilters
+            // `-Pgobley.android.abis=arm64-v8a` limits dev builds to the device ABI; unset keeps all.
+            val abiFilters = project.providers.gradleProperty("gobley.android.abis").orNull
+                ?.split(',')?.map(String::trim)?.filter(String::isNotEmpty)?.toSet()
+                ?: androidDelegate?.abiFilters
             val targets = if (!abiFilters.isNullOrEmpty()) {
                 abiFilters.map(::RustAndroidTarget)
             } else {
