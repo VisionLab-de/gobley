@@ -155,15 +155,7 @@ class CargoPlugin : Plugin<Project> {
         }
         PluginUtils.withAndroidPlugin(this) { delegate ->
             androidDelegate = delegate
-            // `-Pgobley.android.abis=arm64-v8a` limits dev builds to the device ABI; unset keeps all.
-            val abiFilters = project.providers.gradleProperty("gobley.android.abis").orNull
-                ?.split(',')?.map(String::trim)?.filter(String::isNotEmpty)?.toSet()
-                ?: androidDelegate?.abiFilters
-            val targets = if (!abiFilters.isNullOrEmpty()) {
-                abiFilters.map(::RustAndroidTarget)
-            } else {
-                RustAndroidTarget.entries
-            }
+            val targets = selectedAndroidTargets()
 
             cargoExtension.androidTargetsToBuild.convention(project.provider { targets })
 
@@ -294,6 +286,19 @@ class CargoPlugin : Plugin<Project> {
         )
     }
 
+    // `-Pgobley.android.abis=arm64-v8a` (comma-separated) limits dev builds to the device ABI;
+    // unset falls back to the Android abiFilters, then to every ABI.
+    private fun Project.selectedAndroidTargets(): List<RustAndroidTarget> {
+        val abiFilters = providers.gradleProperty("gobley.android.abis").orNull
+            ?.split(',')?.map(String::trim)?.filter(String::isNotEmpty)?.toSet()
+            ?: androidDelegate?.abiFilters
+        return if (!abiFilters.isNullOrEmpty()) {
+            abiFilters.map(::RustAndroidTarget)
+        } else {
+            RustAndroidTarget.entries
+        }
+    }
+
     private fun KotlinTarget.planBuilds() {
         for (rustTarget in requiredRustTargets()) {
             cargoExtension.createOrGetBuild(rustTarget).kotlinTargets.add(this)
@@ -307,7 +312,7 @@ class CargoPlugin : Plugin<Project> {
             }
 
             KotlinPlatformType.androidJvm -> {
-                listOf(GobleyHost.current.rustTarget) + RustAndroidTarget.entries.toTypedArray()
+                listOf(GobleyHost.current.rustTarget) + project.selectedAndroidTargets()
             }
 
             KotlinPlatformType.native -> {
