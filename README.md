@@ -15,6 +15,8 @@ Since the original project is no longer maintained, active development now conti
 
 Currently, Android, Kotlin/JVM, and Kotlin/Native are supported. WASM support lives on this fork's `wasm` branch (the branch tracked by the rival-platform subtree); the upstream README statement "WASM is not supported yet" does not apply here.
 
+Fork changes and upstream release history: [`CHANGELOG.md`](CHANGELOG.md).
+
 ## Features
 
 - UniFFI Bindings Generation for Kotlin Multiplatform (Android, JVM, Kotlin/Native)

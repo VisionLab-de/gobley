@@ -1,5 +1,40 @@
 # Changelog
 
+## Fork changes (VisionLab-de/gobley, branch `wasm`)
+
+Changes made in the VisionLab-de/gobley fork. It is untagged and unreleased, and based on upstream commit `a4d0a0e` (2026-03-26, `v0.3.7` plus 12 upstream commits). The upstream sections below are unchanged.
+
+### Added
+
+- Added a `wasmJs` Kotlin binding backend to `gobley-uniffi-bindgen` (`ConfigKotlinTarget::WasmJs`, `templates/wasm-js/`) that emits `wasmJsMain/.../<ns>.wasmJs.kt` for Kotlin/Wasm, calling the raw `.wasm` through `@JsFun` and `WebAssembly.Memory`.
+- Added callback-interface support on `wasmJs` (`@JsExport` dispatchers, `HandleMap`, vtable lookup through `__indirect_function_table`) and async support in both directions, including the foreign-future completer.
+- Added `wasmJs` wiring in `CargoPlugin` and `UniFfiPlugin`: `wasm32-unknown-unknown` cdylib build, bindings added to `wasmJsMain`, and `transformWasm*` tasks.
+- Added `--mjs-output`, `--crate-name` and `--wasmjs-output` to `gobley-wasm-transformer` (JS shim plus a Kotlin/Wasm-compatible `.kt`); `TransformWasmTask` gained `wasmJsHelpersOutputDirectory` and `wasmJsKotlinOutputDirectory`.
+- Added the `cargo { wasmTransformerEnabled }` property (default `false`); the transformer tasks are skipped unless it is `true`.
+- Added multi-crate bindings: `BindingsGeneration.crates` and the bindgen `--crates a,b` allowlist, with namespace-qualified async callbacks (`gobley_<ns>_*`).
+- Added bindgen `--exported-lib` (requires `--library`), which derives the crate allowlist from the cdylib export table; `UniFfiPlugin` passes the cdylib automatically.
+- Added support for the `com.android.kotlin.multiplatform.library` target (port of gobley/gobley#280) via `GobleyAndroidKotlinMultiplatformExtensionDelegate`.
+- Added the `gobley.android.abis` Gradle property (e.g. `-Pgobley.android.abis=arm64-v8a`) to limit the Android Rust targets built; it also applies to the KMP `androidJvm` target.
+- Added the `gobley.skipAndroidUnitTest` Gradle property and a `gobley-rust-android-unit-test` usage attribute on the Rust runtime configurations, for projects that disable `androidHostTest`.
+
+### Changed
+
+- Changed the bindgen input to prefer the `staticlib` over the cdylib, so `strip = "symbols"` cannot remove the `UNIFFI_META_*` symbols.
+- Changed `installUniffiBindgen` (`CargoInstallTask`) to declare every file of a path-source crate as an input, so edited bindgen templates are no longer reported UP-TO-DATE.
+- Changed wasmJs helper loading: the helper `.mjs` is embedded as a base64 data URL, the dynamic `import()` goes through `new Function` (no webpack "critical dependency" warning), and the host must provide `globalThis.__gobleyKotlinExports` before `init`.
+- Changed the fork's build toolchain to Kotlin 2.4.20, AGP 9.0.0, Gradle wrapper 9.8.0 and kotlinx-coroutines 1.11.0; removed Gradle 10 deprecated usages. Fork crate versions are `gobley-uniffi-bindgen` 0.3.9 and `gobley-wasm-transformer` 0.3.11.
+- Changed `gradle.properties` to set all `gobley.projects.examples.*`, `gradleTests` and `uniffiTests*` flags to `false`; re-enable per flag.
+
+### Fixed
+
+- Fixed the AGP 9 NPE in the JNI lib wiring (`MergeSourceSetFolders.variant` is null) by using `androidComponents.onVariants` and a new `InjectJniLibsTask`, replacing `GobleyKotlinAndroidExtensionDelegate` (port of gobley/gobley#282).
+- Fixed the generated wasmJs `RustBuffer` layout (24 bytes, `u64` capacity and len), `UniffiRustCallStatus` (32 bytes), FFI struct field accessors, `Long` params split into Int pairs, and `i64`/`u64` returns.
+- Fixed wasmJs `ByteBuffer` to use big-endian for the UniFFI wire format (little-endian only for C ABI struct fields).
+- Fixed wasmJs compile errors: dropped `@JvmInline` and the duplicate `*UniffiByValue` factory, and replaced `@Throws` with `@Suppress("ACTUAL_ANNOTATIONS_NOT_MATCH_EXPECT")`.
+- Fixed Kotlin/Wasm crashes on very large `GOBLEY_WASM_BASE64` literals by emitting it in 16 KB chunks.
+- Fixed wasmJs async callback interfaces throwing at runtime: the foreign-future completer and `ForeignFuture.free` are now wired, and `@JsExport` callback exports are safe.
+- Fixed `wasmExports` being an unusable Proxy under Kotlin 2.4.20 (KT-86242): `init` now awaits `globalThis.__gobleyKotlinExports`.
+
 ## [Unreleased](https://github.com/gobley/gobley/compare/v0.3.7...HEAD)
 
 ## [0.3.7](https://github.com/gobley/gobley/releases/tag/v0.3.7) - 2025-10-08
